@@ -1,0 +1,45 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: rfp
+      POSTGRES_USER: rfp
+      POSTGRES_PASSWORD: rfp
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rfp"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build: ./backend
+    ports:
+      - "8080:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DB_URL: jdbc:postgresql://db:5432/rfp
+      DB_USER: rfp
+      DB_PASS: rfp
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production-at-least-32-chars}
+      RFP_LLM_PROVIDER: ${RFP_LLM_PROVIDER:-anthropic}
+      RFP_LLM_API_KEY: ${RFP_LLM_API_KEY:-}
+      RFP_LLM_MODEL: ${RFP_LLM_MODEL:-claude-sonnet-4-6}
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8080
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:

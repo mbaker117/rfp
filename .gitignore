@@ -13,3 +13,4 @@ frontend/out/
 # IDE
 .idea/
 *.iml
+.env

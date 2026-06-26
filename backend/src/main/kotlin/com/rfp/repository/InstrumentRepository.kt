@@ -6,6 +6,8 @@ import org.springframework.data.jpa.repository.Query
 
 interface InstrumentRepository : JpaRepository<Instrument, Long> {
     fun findByCompanyIdIn(companyIds: List<Long>): List<Instrument>
+    fun findByCompanyIdAndNormalizedName(companyId: Long, normalizedName: String): Instrument?
+    fun findByCompanyId(companyId: Long): List<Instrument>
 
     @Query("""
         SELECT i FROM Instrument i

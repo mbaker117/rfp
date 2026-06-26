@@ -17,14 +17,15 @@ import org.springframework.scheduling.annotation.Async
 import org.springframework.stereotype.Service
 import java.time.Instant
 
+// open so tests can subclass and override runScrapeJobAsync without Playwright
 @Service
-class ScrapeService(
+open class ScrapeService(
     private val companyRepo: CompanyRepository,
     private val scrapeJobRepo: ScrapeJobRepository,
     private val instrumentRepo: InstrumentRepository,
+    private val priceHistoryRepo: InstrumentPriceHistoryRepository,
     private val llmService: LlmService,
-    @Value("\${rfp.scraper.throttle-ms:2000}") val throttleMs: Long = 2000,
-    private val priceHistoryRepo: InstrumentPriceHistoryRepository? = null
+    @Value("\${rfp.scraper.throttle-ms:2000}") val throttleMs: Long = 2000
 ) {
     fun enqueueScrapeJob(companyId: Long) {
         val company = companyRepo.findById(companyId).orElseThrow { NoSuchElementException("Company $companyId not found") }
@@ -33,7 +34,7 @@ class ScrapeService(
     }
 
     @Async("taskExecutor")
-    fun runScrapeJobAsync(companyId: Long, jobId: Long) {
+    open fun runScrapeJobAsync(companyId: Long, jobId: Long) {
         val job = scrapeJobRepo.findById(jobId).orElseThrow { NoSuchElementException("Job $jobId not found") }
         val company = companyRepo.findById(companyId).orElseThrow { NoSuchElementException("Company $companyId not found") }
         try {
@@ -61,7 +62,7 @@ class ScrapeService(
                 // Gap A: record price history if price changed
                 val existingPrice = existing.price
                 if (s.price != null && existingPrice != null && s.price.compareTo(existingPrice) != 0) {
-                    priceHistoryRepo?.save(
+                    priceHistoryRepo.save(
                         InstrumentPriceHistory(
                             instrument = existing,
                             price = existingPrice,

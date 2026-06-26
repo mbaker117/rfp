@@ -5,6 +5,7 @@ import com.rfp.domain.ScrapeJob
 import com.rfp.domain.enums.ScrapeStatus
 import com.rfp.dto.ScrapedInstrument
 import com.rfp.repository.CompanyRepository
+import com.rfp.repository.InstrumentPriceHistoryRepository
 import com.rfp.repository.InstrumentRepository
 import com.rfp.repository.ScrapeJobRepository
 import io.mockk.*
@@ -16,8 +17,16 @@ class ScrapeServiceTest {
     private val companyRepo = mockk<CompanyRepository>()
     private val scrapeJobRepo = mockk<ScrapeJobRepository>(relaxed = true)
     private val instrumentRepo = mockk<InstrumentRepository>(relaxed = true)
+    private val priceHistoryRepo = mockk<InstrumentPriceHistoryRepository>(relaxed = true)
     private val llmService = mockk<LlmService>()
-    private val service = ScrapeService(companyRepo, scrapeJobRepo, instrumentRepo, llmService, throttleMs = 0)
+
+    // Anonymous subclass overrides runScrapeJobAsync to be a no-op, avoiding
+    // Playwright in unit tests and sidestepping the @Lazy self-injection wiring.
+    private val service = object : ScrapeService(
+        companyRepo, scrapeJobRepo, instrumentRepo, priceHistoryRepo, llmService, throttleMs = 0
+    ) {
+        override fun runScrapeJobAsync(companyId: Long, jobId: Long) { /* no-op in tests */ }
+    }
 
     @Test
     fun `enqueueScrapeJob saves a PENDING job`() {
@@ -25,13 +34,8 @@ class ScrapeServiceTest {
         val savedJob = ScrapeJob(id = 1L, company = company, status = ScrapeStatus.PENDING)
         every { companyRepo.findById(1L) } returns java.util.Optional.of(company)
         every { scrapeJobRepo.save(any<ScrapeJob>()) } returns savedJob
-        every { scrapeJobRepo.findById(any()) } returns java.util.Optional.of(savedJob)
 
-        // spy so we can stub out the async Playwright crawl that can't run in unit tests
-        val spy = spyk(service)
-        every { spy.runScrapeJobAsync(any(), any()) } just Runs
-
-        spy.enqueueScrapeJob(1L)
+        service.enqueueScrapeJob(1L)
 
         val slot = slot<ScrapeJob>()
         verify { scrapeJobRepo.save(capture(slot)) }

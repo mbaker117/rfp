@@ -12,7 +12,9 @@ import com.rfp.repository.CompanyRepository
 import com.rfp.repository.InstrumentPriceHistoryRepository
 import com.rfp.repository.InstrumentRepository
 import com.rfp.repository.ScrapeJobRepository
+import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.beans.factory.annotation.Value
+import org.springframework.context.annotation.Lazy
 import org.springframework.scheduling.annotation.Async
 import org.springframework.stereotype.Service
 import java.time.Instant
@@ -27,10 +29,15 @@ open class ScrapeService(
     private val llmService: LlmService,
     @Value("\${rfp.scraper.throttle-ms:2000}") val throttleMs: Long = 2000
 ) {
+    // Self-inject via setter to get the Spring proxy (fixes @Async bypass)
+    @Autowired
+    @Lazy
+    lateinit var self: ScrapeService
+
     fun enqueueScrapeJob(companyId: Long) {
         val company = companyRepo.findById(companyId).orElseThrow { NoSuchElementException("Company $companyId not found") }
         val job = scrapeJobRepo.save(ScrapeJob(company = company))
-        runScrapeJobAsync(companyId, job.id)
+        self.runScrapeJobAsync(companyId, job.id)  // now goes through proxy
     }
 
     @Async("taskExecutor")

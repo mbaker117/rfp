@@ -9,6 +9,7 @@ import com.rfp.repository.RfpRequestRepository
 import com.rfp.service.DocumentParsingService
 import com.rfp.service.LlmService
 import com.rfp.service.MatchingService
+import com.rfp.service.ReportService
 import org.springframework.http.HttpStatus
 import org.springframework.http.ResponseEntity
 import org.springframework.security.core.Authentication
@@ -25,7 +26,8 @@ class RfpController(
     private val reqInstrRepo: RequiredInstrumentRepository,
     private val parsingService: DocumentParsingService,
     private val llmService: LlmService,
-    private val matchingService: MatchingService
+    private val matchingService: MatchingService,
+    private val reportService: ReportService
 ) {
     private val mapper = ObjectMapper()
 
@@ -89,6 +91,20 @@ class RfpController(
     }
 
     @GetMapping("/{id}/report/export")
-    fun export(@PathVariable id: Long, @RequestParam format: String): ResponseEntity<Void> =
-        ResponseEntity.status(HttpStatus.NOT_IMPLEMENTED).build()
+    fun export(
+        @PathVariable id: Long,
+        @RequestParam format: String
+    ): ResponseEntity<ByteArray> {
+        return when (format.lowercase()) {
+            "xlsx" -> ResponseEntity.ok()
+                .header("Content-Disposition", "attachment; filename=report-$id.xlsx")
+                .header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                .body(reportService.exportXlsx(id))
+            "pdf" -> ResponseEntity.ok()
+                .header("Content-Disposition", "attachment; filename=report-$id.pdf")
+                .header("Content-Type", "application/pdf")
+                .body(reportService.exportPdf(id))
+            else -> ResponseEntity.badRequest().build()
+        }
+    }
 }

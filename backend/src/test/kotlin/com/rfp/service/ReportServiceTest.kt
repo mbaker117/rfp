@@ -12,18 +12,24 @@ import io.mockk.every
 import io.mockk.mockk
 import org.apache.pdfbox.Loader
 import org.apache.pdfbox.pdmodel.PDDocument
+import org.apache.poi.ss.usermodel.CellType
 import org.apache.poi.xssf.usermodel.XSSFWorkbook
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.Assertions.*
+import org.junit.jupiter.api.assertThrows
 import java.io.ByteArrayInputStream
 import java.math.BigDecimal
 import java.time.Instant
+import java.util.Optional
 
 class ReportServiceTest {
 
     private val rfpRepo: RfpRequestRepository = mockk()
     private val reqInstrRepo: RequiredInstrumentRepository = mockk()
     private val reportService = ReportService(rfpRepo, reqInstrRepo)
+
+    private fun makeRfp(id: Long = 1L) =
+        RfpRequest(id = id, userId = 1L, originalFilename = "test.pdf", fileType = "pdf", status = RfpStatus.DONE)
 
     @Test
     fun `exportXlsx returns valid Excel file with headers and data`() {
@@ -39,13 +45,14 @@ class ReportServiceTest {
         )
         val requiredInst = RequiredInstrument(
             id = 1,
-            rfpRequest = RfpRequest(id = 1L, userId = 1L, originalFilename = "test.pdf", fileType = "pdf", status = RfpStatus.DONE),
+            rfpRequest = makeRfp(),
             rawText = "Test Required Item",
             matchedInstrument = instrument,
             matchingScore = 95,
             matchStatus = MatchStatus.MATCHED
         )
 
+        every { rfpRepo.findById(1L) } returns Optional.of(makeRfp())
         every { reqInstrRepo.findByRfpRequestId(1L) } returns listOf(requiredInst)
 
         val bytes = reportService.exportXlsx(1L)
@@ -81,13 +88,14 @@ class ReportServiceTest {
     fun `exportXlsx handles null matched instrument gracefully`() {
         val requiredInst = RequiredInstrument(
             id = 1,
-            rfpRequest = RfpRequest(id = 1L, userId = 1L, originalFilename = "test.pdf", fileType = "pdf", status = RfpStatus.DONE),
+            rfpRequest = makeRfp(),
             rawText = "Unmatched Item",
             matchedInstrument = null,
             matchingScore = null,
             matchStatus = MatchStatus.NOT_FOUND
         )
 
+        every { rfpRepo.findById(1L) } returns Optional.of(makeRfp())
         every { reqInstrRepo.findByRfpRequestId(1L) } returns listOf(requiredInst)
 
         val bytes = reportService.exportXlsx(1L)
@@ -108,6 +116,7 @@ class ReportServiceTest {
 
     @Test
     fun `exportXlsx with empty items list returns valid workbook`() {
+        every { rfpRepo.findById(1L) } returns Optional.of(makeRfp())
         every { reqInstrRepo.findByRfpRequestId(1L) } returns emptyList()
 
         val bytes = reportService.exportXlsx(1L)
@@ -124,6 +133,45 @@ class ReportServiceTest {
     }
 
     @Test
+    fun `exportXlsx price cell is blank when matchedInstrument is null`() {
+        val requiredInst = RequiredInstrument(
+            id = 1,
+            rfpRequest = makeRfp(),
+            rawText = "No Match Item",
+            matchedInstrument = null,
+            matchingScore = null,
+            matchStatus = MatchStatus.NOT_FOUND
+        )
+
+        every { rfpRepo.findById(1L) } returns Optional.of(makeRfp())
+        every { reqInstrRepo.findByRfpRequestId(1L) } returns listOf(requiredInst)
+
+        val bytes = reportService.exportXlsx(1L)
+        val wb = XSSFWorkbook(ByteArrayInputStream(bytes))
+        val sheet = wb.getSheetAt(0)
+        val dataRow = sheet.getRow(1)
+        val priceCell = dataRow.getCell(4)
+
+        // Cell should be blank (no value set), not showing 0.0
+        assertTrue(
+            priceCell == null || priceCell.cellType == CellType.BLANK,
+            "Price cell should be BLANK when no matched instrument, but was: ${priceCell?.cellType} value=${priceCell?.numericCellValue}"
+        )
+
+        wb.close()
+    }
+
+    @Test
+    fun `exportXlsx throws NoSuchElementException when RFP not found`() {
+        every { rfpRepo.findById(99L) } returns Optional.empty()
+
+        val ex = assertThrows<NoSuchElementException> {
+            reportService.exportXlsx(99L)
+        }
+        assertTrue(ex.message?.contains("99") == true)
+    }
+
+    @Test
     fun `exportPdf returns valid PDF file with title and data`() {
         val company = Company(id = 1, name = "Acme Corp", country = "Jordan")
         val instrument = Instrument(
@@ -137,13 +185,14 @@ class ReportServiceTest {
         )
         val requiredInst = RequiredInstrument(
             id = 1,
-            rfpRequest = RfpRequest(id = 1L, userId = 1L, originalFilename = "test.pdf", fileType = "pdf", status = RfpStatus.DONE),
+            rfpRequest = makeRfp(),
             rawText = "Test Required Item",
             matchedInstrument = instrument,
             matchingScore = 95,
             matchStatus = MatchStatus.MATCHED
         )
 
+        every { rfpRepo.findById(1L) } returns Optional.of(makeRfp())
         every { reqInstrRepo.findByRfpRequestId(1L) } returns listOf(requiredInst)
 
         val bytes = reportService.exportPdf(1L)
@@ -161,13 +210,14 @@ class ReportServiceTest {
     fun `exportPdf handles null matched instrument gracefully`() {
         val requiredInst = RequiredInstrument(
             id = 1,
-            rfpRequest = RfpRequest(id = 1L, userId = 1L, originalFilename = "test.pdf", fileType = "pdf", status = RfpStatus.DONE),
+            rfpRequest = makeRfp(),
             rawText = "Unmatched Item",
             matchedInstrument = null,
             matchingScore = null,
             matchStatus = MatchStatus.NOT_FOUND
         )
 
+        every { rfpRepo.findById(1L) } returns Optional.of(makeRfp())
         every { reqInstrRepo.findByRfpRequestId(1L) } returns listOf(requiredInst)
 
         val bytes = reportService.exportPdf(1L)
@@ -182,6 +232,7 @@ class ReportServiceTest {
 
     @Test
     fun `exportPdf with empty items list returns valid PDF`() {
+        every { rfpRepo.findById(1L) } returns Optional.of(makeRfp())
         every { reqInstrRepo.findByRfpRequestId(1L) } returns emptyList()
 
         val bytes = reportService.exportPdf(1L)
@@ -200,7 +251,7 @@ class ReportServiceTest {
         val items = (1..5).map { i ->
             RequiredInstrument(
                 id = i.toLong(),
-                rfpRequest = RfpRequest(id = 1L, userId = 1L, originalFilename = "test.pdf", fileType = "pdf", status = RfpStatus.DONE),
+                rfpRequest = makeRfp(),
                 rawText = "Item $i",
                 matchedInstrument = Instrument(
                     id = i.toLong(),
@@ -214,6 +265,7 @@ class ReportServiceTest {
             )
         }
 
+        every { rfpRepo.findById(1L) } returns Optional.of(makeRfp())
         every { reqInstrRepo.findByRfpRequestId(1L) } returns items
 
         val bytes = reportService.exportPdf(1L)
@@ -225,5 +277,52 @@ class ReportServiceTest {
         // Multiple items should create new pages if they exceed space
         assertTrue(doc.numberOfPages >= 1)
         doc.close()
+    }
+
+    @Test
+    fun `exportPdf with 50 items generates multiple pages`() {
+        val company = Company(id = 1, name = "Test Corp", country = "Jordan")
+        // At 18f per line, starting at y=720 (750-30 for title), a page holds ~37 items
+        // 50 items should spill onto at least page 2
+        val items = (1..50).map { i ->
+            RequiredInstrument(
+                id = i.toLong(),
+                rfpRequest = makeRfp(),
+                rawText = "Required Instrument Number $i",
+                matchedInstrument = Instrument(
+                    id = i.toLong(),
+                    company = company,
+                    description = "Instrument $i",
+                    normalizedName = "MATCHED_INST_$i",
+                    price = BigDecimal(i * 50)
+                ),
+                matchingScore = 80 + (i % 20),
+                matchStatus = MatchStatus.MATCHED
+            )
+        }
+
+        every { rfpRepo.findById(1L) } returns Optional.of(makeRfp())
+        every { reqInstrRepo.findByRfpRequestId(1L) } returns items
+
+        val bytes = reportService.exportPdf(1L)
+        assertNotNull(bytes)
+        assertTrue(bytes.isNotEmpty())
+
+        val doc = Loader.loadPDF(bytes)
+        assertTrue(
+            doc.numberOfPages >= 2,
+            "50 items should produce at least 2 pages, got ${doc.numberOfPages}"
+        )
+        doc.close()
+    }
+
+    @Test
+    fun `exportPdf throws NoSuchElementException when RFP not found`() {
+        every { rfpRepo.findById(99L) } returns Optional.empty()
+
+        val ex = assertThrows<NoSuchElementException> {
+            reportService.exportPdf(99L)
+        }
+        assertTrue(ex.message?.contains("99") == true)
     }
 }

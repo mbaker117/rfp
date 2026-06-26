@@ -2,6 +2,8 @@ package com.rfp.domain
 
 import com.rfp.domain.enums.MatchStatus
 import jakarta.persistence.*
+import org.hibernate.annotations.JdbcTypeCode
+import org.hibernate.type.SqlTypes
 import java.time.Instant
 
 @Entity
@@ -14,6 +16,7 @@ data class RequiredInstrument(
     val rfpRequest: RfpRequest,
     val rawText: String,
     @Column(columnDefinition = "jsonb")
+    @JdbcTypeCode(SqlTypes.JSON)
     var extractedSpec: String? = null,
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "matched_instrument_id")

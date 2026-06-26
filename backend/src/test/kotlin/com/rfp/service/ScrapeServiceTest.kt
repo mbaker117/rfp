@@ -26,7 +26,7 @@ class ScrapeServiceTest {
         companyRepo, scrapeJobRepo, instrumentRepo, priceHistoryRepo, llmService, throttleMs = 0
     ) {
         override fun runScrapeJobAsync(companyId: Long, jobId: Long) { /* no-op in tests */ }
-    }
+    }.also { it.self = it }
 
     @Test
     fun `enqueueScrapeJob saves a PENDING job`() {

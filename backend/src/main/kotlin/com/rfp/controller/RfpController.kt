@@ -37,9 +37,13 @@ class RfpController(
         @RequestParam("companyIds", required = false, defaultValue = "") companyIds: List<Long>,
         auth: Authentication
     ): ResponseEntity<UploadResponse> {
-        val userId = auth.principal as Long
+        val userId = auth.principal as? Long
+            ?: return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build()
         val originalName = file.originalFilename ?: "upload"
-        val ext = originalName.substringAfterLast('.', "pdf")
+        val ext = originalName.substringAfterLast('.', "").lowercase()
+        if (ext !in setOf("pdf", "docx", "doc", "xlsx", "xls")) {
+            return ResponseEntity.badRequest().build()
+        }
 
         val rfp = rfpRepo.save(
             RfpRequest(userId = userId, originalFilename = originalName, fileType = ext, status = RfpStatus.EXTRACTING)

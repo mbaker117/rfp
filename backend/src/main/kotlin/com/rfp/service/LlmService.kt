@@ -16,6 +16,8 @@ import org.springframework.stereotype.Service
 import java.math.BigDecimal
 import java.security.MessageDigest
 
+class LlmException(message: String) : RuntimeException(message)
+
 @Service
 class LlmService(
     @Value("\${rfp.llm.api-key}") private val apiKey: String,
@@ -42,9 +44,12 @@ class LlmService(
             .header("x-api-key", apiKey)
             .header("anthropic-version", "2023-06-01")
             .build()
-        val response = client.newCall(request).execute()
-        val json = mapper.readTree(response.body!!.string())
-        val text = json["content"][0]["text"].asText()
+        val text = client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) throw LlmException("LLM API error: ${response.code}")
+            val json = mapper.readTree(response.body!!.string())
+            json["content"]?.get(0)?.get("text")?.asText()
+                ?: throw LlmException("Empty LLM response")
+        }
         cache[cacheKey] = text
         return text
     }

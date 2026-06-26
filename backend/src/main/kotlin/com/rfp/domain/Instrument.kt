@@ -1,6 +1,8 @@
 package com.rfp.domain
 
 import jakarta.persistence.*
+import org.hibernate.annotations.JdbcTypeCode
+import org.hibernate.type.SqlTypes
 import java.math.BigDecimal
 import java.time.Instant
 
@@ -18,6 +20,7 @@ data class Instrument(
     var price: BigDecimal? = null,
     val currency: String = "JOD",
     @Column(columnDefinition = "jsonb")
+    @JdbcTypeCode(SqlTypes.JSON)
     var rawData: String? = null,
     var isStale: Boolean = false,
     var llmCacheKey: String? = null,

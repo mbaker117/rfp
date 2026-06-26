@@ -7,11 +7,6 @@ import com.rfp.domain.enums.MatchStatus
 import com.rfp.dto.ExtractedRequirement
 import com.rfp.dto.MatchResult
 import com.rfp.dto.ScrapedInstrument
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
-import org.springframework.beans.factory.annotation.Value
 import org.springframework.stereotype.Service
 import java.math.BigDecimal
 import java.security.MessageDigest
@@ -19,39 +14,14 @@ import java.security.MessageDigest
 class LlmException(message: String) : RuntimeException(message)
 
 @Service
-class LlmService(
-    @Value("\${rfp.llm.api-key}") private val apiKey: String,
-    @Value("\${rfp.llm.model}") private val model: String,
-    @Value("\${rfp.llm.base-url:https://api.anthropic.com/v1/}") private val baseUrl: String = "https://api.anthropic.com/v1/"
-) {
-    private val client = OkHttpClient()
+class LlmService(private val llmClient: LlmClient) {
+
     private val mapper = ObjectMapper().apply { findAndRegisterModules() }
     private val cache = java.util.concurrent.ConcurrentHashMap<String, String>()
 
     private fun call(systemPrompt: String, userMessage: String): String {
         val cacheKey = sha256("$systemPrompt|$userMessage")
-        cache[cacheKey]?.let { return it }
-
-        val body = mapper.writeValueAsString(mapOf(
-            "model" to model,
-            "max_tokens" to 4096,
-            "system" to systemPrompt,
-            "messages" to listOf(mapOf("role" to "user", "content" to userMessage))
-        ))
-        val request = Request.Builder()
-            .url("${baseUrl}messages")
-            .post(body.toRequestBody("application/json".toMediaType()))
-            .header("x-api-key", apiKey)
-            .header("anthropic-version", "2023-06-01")
-            .build()
-        val text = client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) throw LlmException("LLM API error: ${response.code}")
-            val json = mapper.readTree(response.body!!.string())
-            json["content"]?.get(0)?.get("text")?.asText()
-                ?: throw LlmException("Empty LLM response")
-        }
-        cache[cacheKey] = text
-        return text
+        return cache.getOrPut(cacheKey) { llmClient.call(systemPrompt, userMessage) }
     }
 
     fun extractRequirements(documentText: String): List<ExtractedRequirement> {

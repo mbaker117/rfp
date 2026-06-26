@@ -4,7 +4,6 @@ import com.rfp.dto.ExtractedRequirement
 import com.rfp.domain.Company
 import com.rfp.domain.Instrument
 import com.rfp.domain.enums.MatchStatus
-import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.jupiter.api.AfterEach
@@ -19,11 +18,11 @@ class LlmServiceTest {
     @AfterEach fun stop() { server.shutdown() }
 
     private fun makeService(): LlmService =
-        LlmService(
+        LlmService(AnthropicLlmClient(
             apiKey = "test-key",
             model = "claude-sonnet-4-6",
             baseUrl = server.url("/").toString()
-        )
+        ))
 
     @Test
     fun `extractRequirements parses Claude JSON response`() {

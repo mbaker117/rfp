@@ -4,9 +4,6 @@ import com.rfp.dto.ExtractedRequirement
 import com.rfp.domain.Company
 import com.rfp.domain.Instrument
 import com.rfp.domain.enums.MatchStatus
-import io.mockk.every
-import io.mockk.mockk
-import io.mockk.verify
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
@@ -63,5 +60,28 @@ class LlmServiceTest {
         assertEquals(7L, result.matchedInstrumentId)
         assertEquals(92, result.score)
         assertEquals(MatchStatus.MATCHED, result.status)
+    }
+
+    @Test
+    fun `structureScrapeData parses instrument list from Claude response`() {
+        server.enqueue(MockResponse().setBody(
+            """{"content":[{"text":"{\"instruments\":[{\"description\":\"Digital Oscilloscope 200MHz\",\"normalizedName\":\"Oscilloscope 200MHz\",\"manualLink\":\"https://tek.com/manual.pdf\",\"price\":1200.00,\"currency\":\"JOD\"}]}"}]}"""
+        ).addHeader("Content-Type", "application/json"))
+
+        val result = makeService().structureScrapeData("<html>Oscilloscope 200MHz</html>", "Tektronix")
+        assertEquals(1, result.size)
+        assertEquals("Oscilloscope 200MHz", result[0].normalizedName)
+        assertEquals(java.math.BigDecimal("1200.0"), result[0].price)
+    }
+
+    @Test
+    fun `scoreMatch returns NOT_FOUND immediately when candidates list is empty`() {
+        val req = ExtractedRequirement("test", "test", null, emptyMap())
+        val result = makeService().scoreMatch(req, emptyList())
+        assertNull(result.matchedInstrumentId)
+        assertEquals(0, result.score)
+        assertEquals("No candidates", result.reason)
+        assertEquals(MatchStatus.NOT_FOUND, result.status)
+        assertEquals(0, server.requestCount)
     }
 }

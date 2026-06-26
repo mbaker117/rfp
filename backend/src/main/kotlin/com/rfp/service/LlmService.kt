@@ -24,7 +24,7 @@ class LlmService(
 ) {
     private val client = OkHttpClient()
     private val mapper = ObjectMapper().apply { findAndRegisterModules() }
-    private val cache = mutableMapOf<String, String>()
+    private val cache = java.util.concurrent.ConcurrentHashMap<String, String>()
 
     private fun call(systemPrompt: String, userMessage: String): String {
         val cacheKey = sha256("$systemPrompt|$userMessage")

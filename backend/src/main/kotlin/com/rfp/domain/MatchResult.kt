@@ -9,7 +9,7 @@ data class MatchResult(
     @Id @GeneratedValue(strategy = GenerationType.IDENTITY)
     val id: Long = 0,
     @OneToOne(fetch = FetchType.LAZY)
-    @JoinColumn(name = "line_id")
+    @JoinColumn(name = "line_id", unique = true)
     val line: TenderLine,
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "product_id")

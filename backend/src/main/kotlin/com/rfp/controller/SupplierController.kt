@@ -3,8 +3,12 @@ package com.rfp.controller
 
 import com.rfp.domain.Supplier
 import com.rfp.repository.SupplierRepository
+import com.rfp.service.CatalogIngestService
+import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.http.ResponseEntity
+import org.springframework.security.core.Authentication
 import org.springframework.web.bind.annotation.*
+import org.springframework.web.multipart.MultipartFile
 
 data class SupplierRequest(
     val name: String,
@@ -31,6 +35,9 @@ fun Supplier.toResponse() = SupplierResponse(
 @RestController
 @RequestMapping("/suppliers")
 class SupplierController(private val repo: SupplierRepository) {
+
+    @Autowired
+    private lateinit var catalogIngestService: CatalogIngestService
 
     @PostMapping
     fun register(@RequestBody req: SupplierRequest): ResponseEntity<SupplierResponse> {
@@ -69,5 +76,27 @@ class SupplierController(private val repo: SupplierRepository) {
             categories = if (req.categories.isNotEmpty()) req.categories.toTypedArray() else existing.categories
         ))
         return ResponseEntity.ok(updated.toResponse())
+    }
+
+    @PostMapping("/{id}/catalog/upload", consumes = ["multipart/form-data"])
+    fun uploadCatalog(
+        @PathVariable id: Long,
+        @RequestParam("file") file: MultipartFile,
+        @RequestParam("kind", defaultValue = "admin_upload") kind: String,
+        auth: Authentication
+    ): ResponseEntity<Map<String, Any>> {
+        repo.findById(id).orElse(null) ?: return ResponseEntity.notFound().build()
+        val ext = file.originalFilename?.substringAfterLast('.', "")?.lowercase() ?: "bin"
+        if (ext !in setOf("pdf","docx","doc","xlsx","xls"))
+            return ResponseEntity.badRequest().body(mapOf("error" to "Unsupported file type"))
+        catalogIngestService.ingestFile(id, file.bytes, ext, kind)
+        return ResponseEntity.ok(mapOf("supplierId" to id, "status" to "ingest_started"))
+    }
+
+    @PostMapping("/{id}/catalog/scrape")
+    fun triggerScrape(@PathVariable id: Long): ResponseEntity<Map<String, Any>> {
+        repo.findById(id).orElse(null) ?: return ResponseEntity.notFound().build()
+        catalogIngestService.ingestScrape(id)
+        return ResponseEntity.ok(mapOf("supplierId" to id, "status" to "scrape_started"))
     }
 }

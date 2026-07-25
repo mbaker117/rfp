@@ -1,26 +1,40 @@
 package com.rfp.dto
 
-import com.rfp.domain.enums.MatchStatus
 import java.math.BigDecimal
 
-data class ExtractedRequirement(
-    val rawText: String,
+// ── Shared ──────────────────────────────────────────────
+data class ClassSchema(val name: String, val attributes: List<AttrSchema>)
+data class AttrSchema(val name: String, val datatype: String, val canonicalUnit: String?)
+
+// ── Task 1 output ────────────────────────────────────────
+data class ParsedProduct(
+    val className: String,
     val name: String,
-    val quantity: Int?,
-    val specs: Map<String, String>
-)
-
-data class ScrapedInstrument(
-    val description: String,
-    val normalizedName: String,
-    val manualLink: String?,
+    val mpn: String?,
     val price: BigDecimal?,
-    val currency: String = "JOD"
+    val currency: String = "JOD",
+    val attributes: Map<String, Any> = emptyMap()
 )
 
-data class MatchResult(
-    val matchedInstrumentId: Long?,
-    val score: Int,
-    val reason: String,
-    val status: MatchStatus
+// ── Task 2 output ────────────────────────────────────────
+data class ClassDefinition(
+    val className: String,
+    val attributeDefs: List<AttributeDefDto>
+)
+data class AttributeDefDto(
+    val name: String,
+    val label: String,
+    val datatype: String,       // numeric, text, bool, enum
+    val matchOp: String,        // eq, gte, lte
+    val canonicalUnit: String?,
+    val allowedValues: List<String> = emptyList()
+)
+
+// ── Task 3 output ────────────────────────────────────────
+data class ParsedTenderLine(
+    val className: String,
+    val description: String,
+    val qty: BigDecimal?,
+    val qtyUnit: String?,
+    val attributes: Map<String, Any> = emptyMap()
 )

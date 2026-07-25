@@ -2,11 +2,7 @@ package com.rfp.service
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
-import com.rfp.domain.Instrument
-import com.rfp.domain.enums.MatchStatus
-import com.rfp.dto.ExtractedRequirement
-import com.rfp.dto.MatchResult
-import com.rfp.dto.ScrapedInstrument
+import com.rfp.dto.*
 import org.springframework.stereotype.Service
 import java.math.BigDecimal
 import java.security.MessageDigest
@@ -20,71 +16,98 @@ class LlmService(private val llmClient: LlmClient) {
     private val cache = java.util.concurrent.ConcurrentHashMap<String, String>()
 
     private fun call(systemPrompt: String, userMessage: String): String {
-        val cacheKey = sha256("$systemPrompt|$userMessage")
-        return cache.getOrPut(cacheKey) { llmClient.call(systemPrompt, userMessage) }
+        val key = sha256("$systemPrompt|$userMessage")
+        return cache.getOrPut(key) { llmClient.call(systemPrompt, userMessage) }
     }
 
-    fun extractRequirements(documentText: String): List<ExtractedRequirement> {
+    // Task 1: parse raw catalog text into structured products
+    fun parseCatalogBatch(rawText: String, knownClasses: List<ClassSchema>): List<ParsedProduct> {
+        val classHint = if (knownClasses.isEmpty()) "No existing classes yet."
+        else "Known classes and their attribute keys:\n" +
+            knownClasses.joinToString("\n") { c ->
+                "${c.name}: ${c.attributes.joinToString(", ") { "${it.name}(${it.datatype}${it.canonicalUnit?.let { u -> ", unit=$u" } ?: ""})" }}"
+            }
         val system = """
-            Extract all instrument requirements from the document text.
-            Respond ONLY with valid JSON matching this schema:
-            {"requirements": [{"rawText": string, "name": string, "quantity": number|null, "specs": {key: string}}]}
-            Handle Arabic and English text. Do not add commentary.
-        """.trimIndent()
-        val json = mapper.readTree(call(system, documentText))
-        return json["requirements"].map {
-            ExtractedRequirement(
-                rawText = it["rawText"].asText(),
-                name = it["name"].asText(),
-                quantity = it["quantity"]?.takeIf { n -> !n.isNull }?.asInt(),
-                specs = mapper.readValue(it["specs"].toString())
-            )
-        }
-    }
-
-    fun structureScrapeData(rawHtml: String, companyName: String): List<ScrapedInstrument> {
-        val system = """
-            You are given raw HTML/text from $companyName's product catalog.
-            Extract all instruments/products. Respond ONLY with valid JSON:
-            {"instruments": [{"description": string, "normalizedName": string, "manualLink": string|null, "price": number|null, "currency": string}]}
-            Currency default is JOD. Handle Arabic product names.
-        """.trimIndent()
-        val json = mapper.readTree(call(system, rawHtml.take(12000)))
-        return json["instruments"].map {
-            ScrapedInstrument(
-                description = it["description"].asText(),
-                normalizedName = it["normalizedName"].asText(),
-                manualLink = it["manualLink"]?.takeIf { n -> !n.isNull }?.asText(),
-                price = it["price"]?.takeIf { n -> !n.isNull }?.let { v -> BigDecimal(v.asText()) },
-                currency = it["currency"]?.asText() ?: "JOD"
-            )
-        }
-    }
-
-    fun scoreMatch(requirement: ExtractedRequirement, candidates: List<Instrument>): MatchResult {
-        if (candidates.isEmpty()) return MatchResult(null, 0, "No candidates", MatchStatus.NOT_FOUND)
-        val candidateList = candidates.take(10).joinToString("\n") {
-            "ID:${it.id} | ${it.normalizedName} | ${it.description}"
-        }
-        val system = """
-            Match the required instrument to the best candidate from the list.
+            Extract all products from the raw catalog text.
+            $classHint
+            Use existing class names when the product fits. Create a new class_name only when none fit.
+            Use existing attribute key names when the class matches; add new keys only when needed.
             Respond ONLY with valid JSON:
-            {"matchedInstrumentId": number|null, "score": number (0-100), "reason": string, "status": "MATCHED"|"PARTIAL"|"NOT_FOUND"}
-            MATCHED = score >= 80, PARTIAL = 40-79, NOT_FOUND = < 40.
+            {"products":[{"className":string,"name":string,"mpn":string|null,
+              "price":number|null,"currency":string,"attributes":{key:value}}]}
+            Handle Arabic and English. Do not add commentary.
         """.trimIndent()
-        val user = "Required: ${requirement.name} specs=${requirement.specs}\n\nCandidates:\n$candidateList"
-        val json = mapper.readTree(call(system, user))
-        val status = when (json["status"].asText()) {
-            "MATCHED" -> MatchStatus.MATCHED
-            "PARTIAL" -> MatchStatus.PARTIAL
-            else -> MatchStatus.NOT_FOUND
+        val json = mapper.readTree(call(system, rawText.take(12000)))
+        return json["products"].map { p ->
+            ParsedProduct(
+                className = p["className"].asText(),
+                name = p["name"].asText(),
+                mpn = p["mpn"]?.takeIf { !it.isNull }?.asText(),
+                price = p["price"]?.takeIf { !it.isNull }?.let { BigDecimal(it.asText()) },
+                currency = p["currency"]?.asText() ?: "JOD",
+                attributes = mapper.readValue(p["attributes"].toString())
+            )
         }
-        return MatchResult(
-            matchedInstrumentId = json["matchedInstrumentId"]?.takeIf { !it.isNull }?.asLong(),
-            score = json["score"].asInt(),
-            reason = json["reason"].asText(),
-            status = status
+    }
+
+    // Task 2: define a new product class schema
+    fun defineClass(className: String, sampleProducts: List<String>): ClassDefinition {
+        val system = """
+            Define the attribute schema for a new product class named "$className".
+            Based on the sample products, identify all relevant attributes.
+            For each attribute, decide:
+            - datatype: numeric | text | bool | enum
+            - matchOp: eq (must match exactly) | gte (product must be >= required) | lte (product must be <= required)
+            - canonicalUnit: SI unit for numeric attributes, null otherwise
+            - allowedValues: list of values for enum type, empty otherwise
+            Respond ONLY with valid JSON:
+            {"className":string,"attributeDefs":[{"name":string,"label":string,
+              "datatype":string,"matchOp":string,"canonicalUnit":string|null,"allowedValues":[]}]}
+        """.trimIndent()
+        val user = "Class: $className\nSamples:\n${sampleProducts.joinToString("\n")}"
+        val json = mapper.readTree(call(system, user))
+        return ClassDefinition(
+            className = json["className"].asText(),
+            attributeDefs = json["attributeDefs"].map { d ->
+                AttributeDefDto(
+                    name = d["name"].asText(),
+                    label = d["label"].asText(),
+                    datatype = d["datatype"].asText(),
+                    matchOp = d["matchOp"].asText(),
+                    canonicalUnit = d["canonicalUnit"]?.takeIf { !it.isNull }?.asText(),
+                    allowedValues = d["allowedValues"]?.map { it.asText() } ?: emptyList()
+                )
+            }
         )
+    }
+
+    // Task 3: parse RFP/tender document into structured requirement lines
+    fun parseTenderLines(rawText: String, knownClasses: List<ClassSchema>): List<ParsedTenderLine> {
+        val classHint = if (knownClasses.isEmpty()) "No known classes yet — use descriptive class names."
+        else "Known product classes and their attribute keys:\n" +
+            knownClasses.joinToString("\n") { c ->
+                "${c.name}: ${c.attributes.joinToString(", ") { it.name }}"
+            }
+        val system = """
+            Extract all requirement lines from this RFP/tender document.
+            $classHint
+            Match each line to the closest known class. Use its attribute key names in output.
+            For each line emit the required attribute values (not what the product offers — what is required).
+            Respond ONLY with valid JSON:
+            {"lines":[{"className":string,"description":string,"qty":number|null,
+              "qtyUnit":string|null,"attributes":{key:value}}]}
+            Handle Arabic and English. Do not add commentary.
+        """.trimIndent()
+        val json = mapper.readTree(call(system, rawText.take(12000)))
+        return json["lines"].map { l ->
+            ParsedTenderLine(
+                className = l["className"].asText(),
+                description = l["description"].asText(),
+                qty = l["qty"]?.takeIf { !it.isNull }?.let { BigDecimal(it.asText()) },
+                qtyUnit = l["qtyUnit"]?.takeIf { !it.isNull }?.asText(),
+                attributes = mapper.readValue(l["attributes"].toString())
+            )
+        }
     }
 
     private fun sha256(input: String): String =

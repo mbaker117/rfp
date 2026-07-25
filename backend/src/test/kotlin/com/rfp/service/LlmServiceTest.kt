@@ -1,11 +1,14 @@
 package com.rfp.service
 
-import com.rfp.dto.ExtractedRequirement
+import com.rfp.dto.*
 import com.rfp.domain.Company
 import com.rfp.domain.Instrument
 import com.rfp.domain.enums.MatchStatus
+import io.mockk.every
+import io.mockk.mockk
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.BeforeEach
@@ -82,5 +85,51 @@ class LlmServiceTest {
         assertEquals("No candidates", result.reason)
         assertEquals(MatchStatus.NOT_FOUND, result.status)
         assertEquals(0, server.requestCount)
+    }
+
+    @Test
+    fun `parseCatalogBatch returns parsed products`() {
+        val llmClient = mockk<LlmClient>()
+        val service = LlmService(llmClient)
+        every { llmClient.call(any(), any()) } returns """
+            {"products":[{"className":"Multimeter","name":"Fluke 179","mpn":"FL179",
+              "price":320.0,"currency":"JOD","attributes":{"max_voltage":1000,"has_trms":true}}]}
+        """.trimIndent()
+
+        val result = service.parseCatalogBatch("raw text", emptyList())
+        assertThat(result).hasSize(1)
+        assertThat(result[0].name).isEqualTo("Fluke 179")
+        assertThat(result[0].mpn).isEqualTo("FL179")
+    }
+
+    @Test
+    fun `defineClass returns attribute defs with match ops`() {
+        val llmClient = mockk<LlmClient>()
+        val service = LlmService(llmClient)
+        every { llmClient.call(any(), any()) } returns """
+            {"className":"Multimeter","attributeDefs":[
+              {"name":"max_voltage","label":"Max Voltage","datatype":"numeric",
+               "matchOp":"gte","canonicalUnit":"V","allowedValues":[]}
+            ]}
+        """.trimIndent()
+
+        val result = service.defineClass("Multimeter", listOf("Fluke 179 1000V"))
+        assertThat(result.className).isEqualTo("Multimeter")
+        assertThat(result.attributeDefs[0].matchOp).isEqualTo("gte")
+    }
+
+    @Test
+    fun `parseTenderLines returns lines with attributes`() {
+        val llmClient = mockk<LlmClient>()
+        val service = LlmService(llmClient)
+        every { llmClient.call(any(), any()) } returns """
+            {"lines":[{"className":"Multimeter","description":"True RMS multimeter 1000V",
+              "qty":5,"qtyUnit":"pcs","attributes":{"max_voltage":1000,"has_trms":true}}]}
+        """.trimIndent()
+
+        val result = service.parseTenderLines("RFP text", emptyList())
+        assertThat(result).hasSize(1)
+        assertThat(result[0].description).isEqualTo("True RMS multimeter 1000V")
+        assertThat(result[0].qty?.toInt()).isEqualTo(5)
     }
 }

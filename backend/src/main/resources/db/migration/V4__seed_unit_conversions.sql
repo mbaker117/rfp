@@ -1,0 +1,15 @@
+INSERT INTO unit_conversion (dimension, from_unit, to_unit, factor, addend) VALUES
+  ('voltage',   'kV',  'V',   1000,    0),
+  ('voltage',   'mV',  'V',   0.001,   0),
+  ('current',   'mA',  'A',   0.001,   0),
+  ('current',   'kA',  'A',   1000,    0),
+  ('power',     'kW',  'W',   1000,    0),
+  ('power',     'MW',  'W',   1000000, 0),
+  ('length',    'mm',  'm',   0.001,   0),
+  ('length',    'cm',  'm',   0.01,    0),
+  ('length',    'km',  'm',   1000,    0),
+  ('frequency', 'kHz', 'Hz',  1000,    0),
+  ('frequency', 'MHz', 'Hz',  1000000, 0),
+  ('temperature','°F', '°C',  0.5556, -17.778),
+  ('resistance', 'kΩ', 'Ω',   1000,    0),
+  ('resistance', 'MΩ', 'Ω',   1000000, 0);

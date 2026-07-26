@@ -6,6 +6,7 @@ import com.rfp.domain.*
 import com.rfp.repository.*
 import org.springframework.scheduling.annotation.Async
 import org.springframework.stereotype.Service
+import kotlin.math.abs
 
 data class AttributeVerdict(
     val attr: String,
@@ -47,16 +48,21 @@ open class MatchingEngineService(
     }
 
     private fun matchLine(line: TenderLine, supplierIds: List<Long>) {
+        // Stage 1: exact name match, then exact MPN match (short-circuit: MPN only if name misses)
         val exactByName = line.description?.let {
             productRepo.findBySupplierIdInAndIsStaleAndNameIgnoreCase(supplierIds, false, it)
         } ?: emptyList()
-        val exactByMpn = line.description?.let {
-            productRepo.findBySupplierIdInAndIsStaleAndMpnIgnoreCase(supplierIds, false, it)
-        } ?: emptyList()
-        val exactMatch = (exactByName + exactByMpn).firstOrNull()
+        val exactMatch = exactByName.firstOrNull()
+            ?: line.description?.let {
+                productRepo.findBySupplierIdInAndIsStaleAndMpnIgnoreCase(supplierIds, false, it)
+            }?.firstOrNull()
+
+        // Upsert: reuse existing result row if this line was already matched
+        val existingId = matchResultRepo.findByLineId(line.id)?.id ?: 0L
 
         if (exactMatch != null) {
             matchResultRepo.save(MatchResult(
+                id = existingId,
                 line = line,
                 product = exactMatch,
                 matchType = "exact",
@@ -70,8 +76,9 @@ open class MatchingEngineService(
 
         val classId = line.productClass?.id
         if (classId == null) {
-            matchResultRepo.save(MatchResult(line = line, product = null, matchType = null,
-                score = 0, attributeVerdicts = "[]", status = "not_found", alternatives = "[]"))
+            matchResultRepo.save(MatchResult(id = existingId, line = line, product = null,
+                matchType = null, score = 0, attributeVerdicts = "[]",
+                status = "not_found", alternatives = "[]"))
             return
         }
 
@@ -87,8 +94,9 @@ open class MatchingEngineService(
         val alternatives = scored.drop(1).filter { it.score >= 40 }.take(5)
 
         if (best == null) {
-            matchResultRepo.save(MatchResult(line = line, product = null, matchType = "spec",
-                score = 0, attributeVerdicts = "[]", status = "not_found", alternatives = "[]"))
+            matchResultRepo.save(MatchResult(id = existingId, line = line, product = null,
+                matchType = "spec", score = 0, attributeVerdicts = "[]",
+                status = "not_found", alternatives = "[]"))
             return
         }
 
@@ -100,6 +108,7 @@ open class MatchingEngineService(
         }
 
         matchResultRepo.save(MatchResult(
+            id = existingId,
             line = line,
             product = bestProduct,
             matchType = "spec",
@@ -121,23 +130,19 @@ open class MatchingEngineService(
         attrDefs: List<AttributeDef>
     ): CandidateScore {
         val productAttrs: Map<String, Any> = mapper.readValue(product.attributes)
+        val defMap = attrDefs.associateBy { it.name }
         val verdicts = mutableListOf<AttributeVerdict>()
 
-        attrDefs.forEach { def ->
-            val required = lineAttrs[def.name] ?: return@forEach
-            val offered = productAttrs[def.name]
-            if (offered == null) {
-                verdicts.add(AttributeVerdict(def.name, required, null, "UNVERIFIABLE"))
-                return@forEach
+        // I7: iterate over REQUIRED attributes (lineAttrs), not attrDefs
+        lineAttrs.forEach { (attrName, required) ->
+            val def = defMap[attrName]
+            val offered = productAttrs[attrName]
+
+            val verdict = when {
+                def == null || offered == null -> "UNVERIFIABLE"
+                else -> evalVerdict(def, required, offered)
             }
-            val compliant = when (def.matchOp) {
-                "eq"  -> offered.toString() == required.toString()
-                "gte" -> toDouble(offered) >= toDouble(required)
-                "lte" -> toDouble(offered) <= toDouble(required)
-                else  -> false
-            }
-            verdicts.add(AttributeVerdict(def.name, required, offered,
-                if (compliant) "COMPLIANT" else "DEVIATION"))
+            verdicts.add(AttributeVerdict(attrName, required, offered, verdict))
         }
 
         val score = if (verdicts.isEmpty()) 0
@@ -146,8 +151,35 @@ open class MatchingEngineService(
         return CandidateScore(product.id, score, verdicts)
     }
 
-    private fun toDouble(v: Any): Double = when (v) {
+    // I2/I3: type-safe comparison; returns UNVERIFIABLE when values can't be parsed
+    private fun evalVerdict(def: AttributeDef, required: Any, offered: Any): String =
+        when (def.matchOp) {
+            "eq" -> when (def.datatype) {
+                "numeric" -> {
+                    val r = toDoubleOrNull(required) ?: return "UNVERIFIABLE"
+                    val o = toDoubleOrNull(offered) ?: return "UNVERIFIABLE"
+                    if (abs(r - o) < 1e-9) "COMPLIANT" else "DEVIATION"
+                }
+                "bool" -> if (required.toString().equals(offered.toString(), ignoreCase = true))
+                    "COMPLIANT" else "DEVIATION"
+                else -> if (required.toString().trim().equals(offered.toString().trim(), ignoreCase = true))
+                    "COMPLIANT" else "DEVIATION"
+            }
+            "gte" -> {
+                val r = toDoubleOrNull(required) ?: return "UNVERIFIABLE"
+                val o = toDoubleOrNull(offered) ?: return "UNVERIFIABLE"
+                if (o >= r) "COMPLIANT" else "DEVIATION"
+            }
+            "lte" -> {
+                val r = toDoubleOrNull(required) ?: return "UNVERIFIABLE"
+                val o = toDoubleOrNull(offered) ?: return "UNVERIFIABLE"
+                if (o <= r) "COMPLIANT" else "DEVIATION"
+            }
+            else -> "UNVERIFIABLE"
+        }
+
+    private fun toDoubleOrNull(v: Any): Double? = when (v) {
         is Number -> v.toDouble()
-        else      -> v.toString().toDoubleOrNull() ?: 0.0
+        else -> v.toString().toDoubleOrNull()
     }
 }

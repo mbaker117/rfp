@@ -20,6 +20,16 @@ class LlmService(private val llmClient: LlmClient) {
         return cache.getOrPut(key) { llmClient.call(systemPrompt, userMessage) }
     }
 
+    private fun parseJson(raw: String) = try {
+        // Strip markdown code fences that some models add
+        val cleaned = raw.trim()
+            .removePrefix("```json").removePrefix("```")
+            .trimStart().removeSuffix("```").trimEnd()
+        mapper.readTree(cleaned)
+    } catch (e: Exception) {
+        throw LlmException("Failed to parse LLM JSON: ${raw.take(300)}")
+    }
+
     // Task 1: parse raw catalog text into structured products
     fun parseCatalogBatch(rawText: String, knownClasses: List<ClassSchema>): List<ParsedProduct> {
         val classHint = if (knownClasses.isEmpty()) "No existing classes yet."
@@ -37,8 +47,9 @@ class LlmService(private val llmClient: LlmClient) {
               "price":number|null,"currency":string,"attributes":{key:value}}]}
             Handle Arabic and English. Do not add commentary.
         """.trimIndent()
-        val json = mapper.readTree(call(system, rawText.take(12000)))
-        return json["products"].map { p ->
+        val json = parseJson(call(system, rawText.take(12000)))
+        val products = json["products"] ?: throw LlmException("LLM response missing 'products' key")
+        return products.map { p ->
             ParsedProduct(
                 className = p["className"].asText(),
                 name = p["name"].asText(),
@@ -65,10 +76,11 @@ class LlmService(private val llmClient: LlmClient) {
               "datatype":string,"matchOp":string,"canonicalUnit":string|null,"allowedValues":[]}]}
         """.trimIndent()
         val user = "Class: $className\nSamples:\n${sampleProducts.joinToString("\n")}"
-        val json = mapper.readTree(call(system, user))
+        val json = parseJson(call(system, user))
+        val attrDefs = json["attributeDefs"] ?: throw LlmException("LLM response missing 'attributeDefs' key")
         return ClassDefinition(
-            className = json["className"].asText(),
-            attributeDefs = json["attributeDefs"].map { d ->
+            className = json["className"]?.asText() ?: throw LlmException("LLM response missing 'className' key"),
+            attributeDefs = attrDefs.map { d ->
                 AttributeDefDto(
                     name = d["name"].asText(),
                     label = d["label"].asText(),
@@ -98,8 +110,9 @@ class LlmService(private val llmClient: LlmClient) {
               "qtyUnit":string|null,"attributes":{key:value}}]}
             Handle Arabic and English. Do not add commentary.
         """.trimIndent()
-        val json = mapper.readTree(call(system, rawText.take(12000)))
-        return json["lines"].map { l ->
+        val json = parseJson(call(system, rawText.take(12000)))
+        val lines = json["lines"] ?: throw LlmException("LLM response missing 'lines' key")
+        return lines.map { l ->
             ParsedTenderLine(
                 className = l["className"].asText(),
                 description = l["description"].asText(),

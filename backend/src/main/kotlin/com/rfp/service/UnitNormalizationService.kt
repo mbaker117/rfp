@@ -9,13 +9,15 @@ class UnitNormalizationService(private val jdbc: JdbcTemplate) {
 
     fun normalize(value: Double, fromUnit: String, toUnit: String): Double {
         if (fromUnit == toUnit) return value
-        val factor = try {
-            jdbc.queryForObject(
-                "SELECT factor FROM unit_conversion WHERE from_unit = ? AND to_unit = ?",
-                Double::class.java, fromUnit, toUnit
-            ) ?: return value
+        val row = try {
+            jdbc.queryForList(
+                "SELECT factor, addend FROM unit_conversion WHERE from_unit = ? AND to_unit = ?",
+                fromUnit, toUnit
+            ).firstOrNull() ?: return value
         } catch (e: Exception) { return value }
-        return value * factor
+        val factor = (row["factor"] as? Number)?.toDouble() ?: return value
+        val addend = (row["addend"] as? Number)?.toDouble() ?: 0.0
+        return value * factor + addend
     }
 
     // Normalize a raw attribute map to canonical units based on attribute definitions.

@@ -36,6 +36,7 @@ open class CatalogIngestService(
             runIngest(ingest, rawText, "upload")
         } catch (e: Exception) {
             ingestRepo.save(ingest.copy(status = "FAILED", errorMsg = e.message, finishedAt = Instant.now()))
+            supplierRepo.save(supplier.copy(scrapeStatus = "FAILED"))
         }
     }
 
@@ -49,6 +50,7 @@ open class CatalogIngestService(
             runIngest(ingest, html, "scrape")
         } catch (e: Exception) {
             ingestRepo.save(ingest.copy(status = "FAILED", errorMsg = e.message, finishedAt = Instant.now()))
+            supplierRepo.save(supplier.copy(scrapeStatus = "FAILED"))
         }
     }
 
@@ -112,6 +114,8 @@ open class CatalogIngestService(
             .forEach { productRepo.save(it.copy(isStale = true)) }
 
         ingestRepo.save(ingest.copy(status = "DONE", finishedAt = Instant.now()))
+        // Mark the supplier as freshly scraped so CatalogRefreshJob picks up the right cutoff
+        supplierRepo.save(ingest.supplier.copy(scrapeStatus = "DONE", lastScrapedAt = Instant.now()))
     }
 
     private fun resolveOrCreateClass(className: String, samples: List<String>): ProductClass {

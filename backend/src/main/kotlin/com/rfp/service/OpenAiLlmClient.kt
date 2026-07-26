@@ -23,6 +23,7 @@ class OpenAiLlmClient(
     override fun call(systemPrompt: String, userMessage: String): String {
         val body = mapper.writeValueAsString(mapOf(
             "model" to model,
+            "temperature" to 0,
             "messages" to listOf(
                 mapOf("role" to "system", "content" to systemPrompt),
                 mapOf("role" to "user", "content" to userMessage)

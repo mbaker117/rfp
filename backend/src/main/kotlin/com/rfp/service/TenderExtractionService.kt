@@ -5,18 +5,19 @@ import com.rfp.domain.*
 import com.rfp.repository.*
 import org.springframework.scheduling.annotation.Async
 import org.springframework.stereotype.Service
-import java.time.Instant
 
 @Service
 open class TenderExtractionService(
     private val tenderRepo: TenderRepository,
     private val tenderLineRepo: TenderLineRepository,
     private val tenderSupplierRepo: TenderSupplierRepository,
+    private val supplierRepo: SupplierRepository,
     private val productClassRepo: ProductClassRepository,
     private val attrDefRepo: AttributeDefRepository,
     private val llmService: LlmService,
     private val unitService: UnitNormalizationService,
-    private val docParser: DocumentParsingService
+    private val docParser: DocumentParsingService,
+    private val matchingService: MatchingEngineService
 ) {
     private val mapper = ObjectMapper().apply { findAndRegisterModules() }
 
@@ -29,14 +30,15 @@ open class TenderExtractionService(
             tenderSupplierRepo.save(TenderSupplier(
                 id = TenderSupplierId(tenderId, sid),
                 tender = tender,
-                supplier = Supplier(id = sid, name = "")
+                supplier = supplierRepo.getReferenceById(sid)
             ))
         }
 
         try {
             val rawText = docParser.extractText(bytes, fileType)
             runExtraction(tender, rawText)
-            tenderRepo.save(tender.copy(status = "matching"))
+            // C6: chain extraction → matching automatically
+            matchingService.matchAsync(tenderId)
         } catch (e: Exception) {
             tenderRepo.save(tender.copy(status = "failed"))
             throw e

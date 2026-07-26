@@ -17,7 +17,7 @@ class CatalogRefreshJob(
     @SchedulerLock(name = "catalogRefreshJob", lockAtMostFor = "PT2H")
     fun refreshStaleSuppliers() {
         val cutoff = Instant.now().minus(7, ChronoUnit.DAYS)
-        supplierRepo.findByLastScrapedAtBefore(cutoff)
+        supplierRepo.findByLastScrapedAtBeforeOrLastScrapedAtIsNull(cutoff)
             .forEach { catalogIngestService.ingestScrape(it.id) }
     }
 }

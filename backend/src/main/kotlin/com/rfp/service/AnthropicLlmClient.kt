@@ -24,6 +24,7 @@ class AnthropicLlmClient(
         val body = mapper.writeValueAsString(mapOf(
             "model" to model,
             "max_tokens" to 4096,
+            "temperature" to 0,
             "system" to systemPrompt,
             "messages" to listOf(mapOf("role" to "user", "content" to userMessage))
         ))

@@ -2,10 +2,9 @@
 import { useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { FileUpload } from '@/src/components/FileUpload';
-import { CompanySelector } from '@/src/components/CompanySelector';
+import SupplierSelector from '@/src/components/SupplierSelector';
 import { JobStatusPoller } from '@/src/components/JobStatusPoller';
 import { api } from '@/src/lib/api';
-import type { Company } from '@/src/lib/types';
 
 export default function Home() {
   const router = useRouter();
@@ -13,42 +12,21 @@ export default function Home() {
     typeof window !== 'undefined' ? (localStorage.getItem('token') ?? '') : '',
   );
   const [file, setFile] = useState<File | null>(null);
-  const [companies, setCompanies] = useState<Company[]>([]);
-  const [selected, setSelected] = useState<number[]>([]);
+  const [selectedSupplierIds, setSelectedSupplierIds] = useState<number[]>([]);
   const [rfpId, setRfpId] = useState<number | null>(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
-  const addCompany = async (name: string) => {
-    if (!name) return;
-    try {
-      const resolved = await api.resolveCompanies([name], token);
-      setCompanies(prev => [
-        ...prev,
-        ...resolved.filter(r => !prev.find(p => p.id === r.id)),
-      ]);
-      setSelected(prev => [...prev, ...resolved.map(r => r.id)]);
-    } catch (e) {
-      setError(String(e));
-    }
-  };
-
-  const toggleSelect = (id: number) => {
-    setSelected(prev =>
-      prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id],
-    );
-  };
-
   const submit = async () => {
-    if (!file || selected.length === 0) {
-      setError('Select a file and at least one company');
+    if (!file || selectedSupplierIds.length === 0) {
+      setError('Select a file and at least one supplier');
       return;
     }
     setError('');
     setLoading(true);
     try {
-      const { rfpId: id } = await api.uploadRfp(file, selected, token);
-      await api.triggerMatch(id, selected, token);
+      const { rfpId: id } = await api.uploadRfp(file, selectedSupplierIds, token);
+      await api.triggerMatch(id, token);
       setRfpId(id);
     } catch (e) {
       setError(String(e));
@@ -58,7 +36,7 @@ export default function Home() {
   };
 
   const onComplete = useCallback(() => {
-    router.push(`/rfp/${rfpId}`);
+    if (rfpId !== null) router.push(`/rfp/${rfpId}`);
   }, [rfpId, router]);
 
   return (
@@ -71,7 +49,7 @@ export default function Home() {
         </p>
       )}
 
-      {rfpId ? (
+      {rfpId !== null ? (
         <JobStatusPoller
           rfpId={rfpId}
           token={token}
@@ -86,11 +64,10 @@ export default function Home() {
               Selected: <span className="font-medium">{file.name}</span>
             </p>
           )}
-          <CompanySelector
-            companies={companies}
-            selected={selected}
-            onToggle={toggleSelect}
-            onAddName={addCompany}
+          <SupplierSelector
+            token={token}
+            selected={selectedSupplierIds}
+            onChange={setSelectedSupplierIds}
           />
           <button
             onClick={submit}

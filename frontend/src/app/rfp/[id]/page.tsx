@@ -35,14 +35,16 @@ export default function ReportPage() {
   if (error) return <p className="text-red-600 p-8">{error}</p>;
   if (!report) return <p className="p-8">Loading report...</p>;
 
-  const matched = report.items.filter(i => i.status === 'MATCHED').length;
-  const notFound = report.items.filter(i => i.status === 'NOT_FOUND').length;
+  const matched = report.items.filter(i => i.status === 'matched').length;
+  const partial = report.items.filter(i => i.status === 'partial').length;
+  const notFound = report.items.filter(i => i.status === 'not_found').length;
 
   return (
     <main className="max-w-5xl mx-auto py-8 px-4 space-y-4">
       <h1 className="text-2xl font-bold">Matching Report — RFP #{report.rfpId}</h1>
       <div className="flex gap-6 text-sm">
         <span className="text-green-700 font-semibold">{matched} matched</span>
+        <span className="text-yellow-700 font-semibold">{partial} partial</span>
         <span className="text-red-600 font-semibold">{notFound} not found</span>
         <span className="text-gray-600">{report.items.length} total</span>
       </div>

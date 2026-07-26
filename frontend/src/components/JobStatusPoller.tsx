@@ -14,10 +14,10 @@ export function JobStatusPoller({ rfpId, token, onComplete, onError }: Props) {
     const interval = setInterval(async () => {
       try {
         const report = await api.getReport(rfpId, token);
-        if (report.status === 'DONE') {
+        if (report.status === 'done') {
           clearInterval(interval);
           onComplete();
-        } else if (report.status === 'FAILED') {
+        } else if (report.status === 'failed') {
           clearInterval(interval);
           onError('Matching failed');
         }

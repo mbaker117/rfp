@@ -12,11 +12,13 @@ class TenderExtractionServiceTest {
     private val tenderRepo = mockk<TenderRepository>()
     private val tenderLineRepo = mockk<TenderLineRepository>()
     private val tenderSupplierRepo = mockk<TenderSupplierRepository>()
+    private val supplierRepo = mockk<SupplierRepository>()
     private val productClassRepo = mockk<ProductClassRepository>()
     private val attrDefRepo = mockk<AttributeDefRepository>()
     private val llmService = mockk<LlmService>()
     private val unitService = mockk<UnitNormalizationService>()
     private val docParser = mockk<DocumentParsingService>()
+    private val matchingService = mockk<MatchingEngineService>(relaxed = true)
 
     @Test
     fun `extract saves tender lines with class and attributes`() {
@@ -41,7 +43,8 @@ class TenderExtractionServiceTest {
 
         val service = TenderExtractionService(
             tenderRepo, tenderLineRepo, tenderSupplierRepo,
-            productClassRepo, attrDefRepo, llmService, unitService, docParser
+            supplierRepo, productClassRepo, attrDefRepo, llmService, unitService, docParser,
+            matchingService
         )
         service.runExtraction(tender, "RFP content")
 

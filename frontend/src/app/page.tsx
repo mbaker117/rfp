@@ -26,7 +26,7 @@ export default function Home() {
     setLoading(true);
     try {
       const { rfpId: id } = await api.uploadRfp(file, selectedSupplierIds, token);
-      await api.triggerMatch(id, token);
+      // Matching is auto-triggered server-side after extraction completes
       setRfpId(id);
     } catch (e) {
       setError(String(e));

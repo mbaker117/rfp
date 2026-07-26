@@ -12,8 +12,8 @@ class UnitNormalizationServiceTest {
     fun `converts kV to V`() {
         val jdbc = mockk<JdbcTemplate>()
         every {
-            jdbc.queryForObject(any<String>(), eq(Double::class.java), eq("kV"), eq("V"))
-        } returns 1000.0
+            jdbc.queryForList(any<String>(), eq("kV"), eq("V"))
+        } returns listOf(mapOf("factor" to 1000.0, "addend" to 0.0))
         val service = UnitNormalizationService(jdbc)
         assertThat(service.normalize(5.0, "kV", "V")).isEqualTo(5000.0)
     }

@@ -41,8 +41,10 @@ class CatalogIngestServiceTest {
         every { productRepo.findBySupplierIdAndMpnIgnoreCase(1L, "FL179") } returns null
         every { productRepo.findBySupplierIdAndNameIgnoreCase(1L, "Fluke 179") } returns null
         every { productRepo.save(any()) } answers { firstArg<Product>().copy(id = 5L) }
+        every { productPriceRepo.findById(any()) } returns java.util.Optional.empty()
         every { productPriceRepo.save(any()) } answers { firstArg() }
         every { productRepo.findBySupplierId(1L) } returns emptyList()
+        every { supplierRepo.save(any()) } answers { firstArg() }
 
         val service = CatalogIngestService(
             supplierRepo, productClassRepo, attrDefRepo, productRepo,

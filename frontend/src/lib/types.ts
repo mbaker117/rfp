@@ -1,23 +1,47 @@
-export interface Company {
+export interface Supplier {
   id: number;
   name: string;
-  scrapeStatus: 'PENDING' | 'RUNNING' | 'DONE' | 'FAILED';
+  officialWebsite?: string;
+  contactEmail?: string;
+  contactPhone?: string;
+  country?: string;
+  description?: string;
+  categories: string[];
+  scrapeStatus: string;
 }
 
-export interface ReportItem {
-  requiredInstrument: string;
-  matchedInstrument: string | null;
-  manualLink: string | null;
-  score: number | null;
-  status: 'MATCHED' | 'PARTIAL' | 'NOT_FOUND' | null;
-  price: number | null;
-  currency: string;
+export interface AttributeVerdict {
+  attr: string;
+  required: unknown;
+  offered: unknown;
+  verdict: 'COMPLIANT' | 'DEVIATION' | 'UNVERIFIABLE';
+}
+
+export interface Alternative {
+  productId: number;
+  name: string;
+  mpn: string | null;
+  score: number;
+  attributeVerdicts: AttributeVerdict[];
+}
+
+export interface MatchResultItem {
+  lineId: number;
+  description: string;
+  qty: number | null;
+  matchType: 'exact' | 'spec' | null;
+  score: number;
+  status: 'matched' | 'partial' | 'not_found';
+  matchedProduct: string | null;
+  mpn: string | null;
+  attributeVerdicts: AttributeVerdict[];
+  alternatives: Alternative[];
 }
 
 export interface RfpReport {
   rfpId: number;
   status: string;
-  items: ReportItem[];
+  items: MatchResultItem[];
 }
 
 export interface JobStatus {

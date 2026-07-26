@@ -1,105 +1,74 @@
 package com.rfp.controller
 
-import com.fasterxml.jackson.databind.ObjectMapper
-import com.rfp.domain.RequiredInstrument
-import com.rfp.domain.RfpRequest
-import com.rfp.domain.enums.RfpStatus
-import com.rfp.repository.RequiredInstrumentRepository
-import com.rfp.repository.RfpRequestRepository
-import com.rfp.service.DocumentParsingService
-import com.rfp.service.LlmService
-import com.rfp.service.MatchingService
+import com.rfp.domain.Tender
+import com.rfp.repository.MatchResultRepository
+import com.rfp.repository.TenderRepository
+import com.rfp.repository.TenderLineRepository
 import com.rfp.service.ReportService
+import com.rfp.service.TenderExtractionService
+import com.rfp.service.MatchingEngineService
 import org.springframework.http.HttpStatus
 import org.springframework.http.ResponseEntity
 import org.springframework.security.core.Authentication
 import org.springframework.web.bind.annotation.*
 import org.springframework.web.multipart.MultipartFile
 
-data class UploadResponse(val rfpId: Long)
-data class MatchJobResponse(val jobId: String)
-
 @RestController
 @RequestMapping("/rfp")
 class RfpController(
-    private val rfpRepo: RfpRequestRepository,
-    private val reqInstrRepo: RequiredInstrumentRepository,
-    private val parsingService: DocumentParsingService,
-    private val llmService: LlmService,
-    private val matchingService: MatchingService,
+    private val tenderRepo: TenderRepository,
+    private val tenderLineRepo: TenderLineRepository,
+    private val matchResultRepo: MatchResultRepository,
+    private val extractionService: TenderExtractionService,
+    private val matchingService: MatchingEngineService,
     private val reportService: ReportService
 ) {
-    private val mapper = ObjectMapper()
-
     @PostMapping("/upload", consumes = ["multipart/form-data"])
     fun upload(
         @RequestParam("file") file: MultipartFile,
-        @RequestParam("companyIds", required = false, defaultValue = "") companyIds: List<Long>,
+        @RequestParam("supplierIds", required = false, defaultValue = "") supplierIds: List<Long>,
         auth: Authentication
-    ): ResponseEntity<UploadResponse> {
-        val userId = auth.principal as? Long
-            ?: return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build()
-        val originalName = file.originalFilename ?: "upload"
-        val ext = originalName.substringAfterLast('.', "").lowercase()
-        if (ext !in setOf("pdf", "docx", "doc", "xlsx", "xls")) {
-            return ResponseEntity.badRequest().build()
-        }
+    ): ResponseEntity<Map<String, Any>> {
+        val userId = auth.principal as? Long ?: return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build()
+        val ext = file.originalFilename?.substringAfterLast('.', "")?.lowercase() ?: ""
+        if (ext !in setOf("pdf", "docx", "doc", "xlsx", "xls"))
+            return ResponseEntity.badRequest().body(mapOf("error" to "Unsupported file type"))
 
-        val rfp = rfpRepo.save(
-            RfpRequest(userId = userId, originalFilename = originalName, fileType = ext, status = RfpStatus.EXTRACTING)
-        )
-
-        val text = parsingService.extractText(file.bytes, ext)
-        val requirements = llmService.extractRequirements(text)
-
-        requirements.forEach { req ->
-            reqInstrRepo.save(
-                RequiredInstrument(
-                    rfpRequest = rfp,
-                    rawText = req.rawText,
-                    extractedSpec = mapper.writeValueAsString(mapOf("name" to req.name, "specs" to req.specs))
-                )
-            )
-        }
-
-        rfpRepo.save(rfp.copy(status = RfpStatus.UPLOADED))
-        return ResponseEntity.ok(UploadResponse(rfp.id))
+        val tender = tenderRepo.save(Tender(userId = userId, filename = file.originalFilename ?: "upload", fileType = ext))
+        extractionService.extract(tender.id, file.bytes, ext, supplierIds)
+        return ResponseEntity.ok(mapOf("rfpId" to tender.id))
     }
 
     @PostMapping("/{id}/match")
-    fun match(
-        @PathVariable id: Long,
-        @RequestBody body: Map<String, List<Long>>
-    ): ResponseEntity<MatchJobResponse> {
-        rfpRepo.findById(id).orElseThrow { NoSuchElementException("RFP $id not found") }
-        val companyIds = body["companyIds"] ?: emptyList()
-        matchingService.matchAsync(id, companyIds)
-        return ResponseEntity.ok(MatchJobResponse("rfp-$id-match"))
+    fun match(@PathVariable id: Long): ResponseEntity<Map<String, Any>> {
+        tenderRepo.findById(id).orElseThrow { NoSuchElementException("Tender $id not found") }
+        matchingService.matchAsync(id)
+        return ResponseEntity.ok(mapOf("jobId" to "rfp-$id-match"))
     }
 
     @GetMapping("/{id}/report")
     fun report(@PathVariable id: Long): ResponseEntity<Map<String, Any?>> {
-        val rfp = rfpRepo.findById(id).orElseThrow { NoSuchElementException("RFP $id not found") }
-        val items = reqInstrRepo.findByRfpRequestId(id).map { r ->
+        val tender = tenderRepo.findById(id).orElseThrow { NoSuchElementException("Tender $id not found") }
+        val results = matchResultRepo.findByLineTenderId(id).map { r ->
             mapOf(
-                "requiredInstrument" to r.rawText,
-                "matchedInstrument" to r.matchedInstrument?.normalizedName,
-                "manualLink" to r.matchedInstrument?.manualLink,
-                "score" to r.matchingScore,
-                "status" to r.matchStatus,
-                "price" to r.matchedInstrument?.price,
-                "currency" to (r.matchedInstrument?.currency ?: "JOD")
+                "lineId" to r.line.id,
+                "description" to r.line.description,
+                "qty" to r.line.qty,
+                "matchType" to r.matchType,
+                "score" to r.score,
+                "status" to r.status,
+                "matchedProduct" to r.product?.name,
+                "mpn" to r.product?.mpn,
+                "attributeVerdicts" to r.attributeVerdicts,
+                "alternatives" to r.alternatives
             )
         }
-        return ResponseEntity.ok(mapOf("rfpId" to rfp.id, "status" to rfp.status, "items" to items))
+        return ResponseEntity.ok(mapOf("rfpId" to tender.id, "status" to tender.status, "items" to results))
     }
 
     @GetMapping("/{id}/report/export")
-    fun export(
-        @PathVariable id: Long,
-        @RequestParam format: String
-    ): ResponseEntity<ByteArray> {
-        return when (format.lowercase()) {
+    fun export(@PathVariable id: Long, @RequestParam format: String): ResponseEntity<ByteArray> =
+        when (format.lowercase()) {
             "xlsx" -> ResponseEntity.ok()
                 .header("Content-Disposition", "attachment; filename=report-$id.xlsx")
                 .header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
@@ -110,5 +79,4 @@ class RfpController(
                 .body(reportService.exportPdf(id))
             else -> ResponseEntity.badRequest().build()
         }
-    }
 }

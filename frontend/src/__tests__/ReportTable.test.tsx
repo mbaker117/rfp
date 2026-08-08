@@ -1,5 +1,5 @@
 import '@testing-library/jest-dom';
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import { ReportTable } from '../components/ReportTable';
 import type { MatchResultItem } from '../lib/types';
 
@@ -52,24 +52,29 @@ test('renders matched item with score, product and mpn', () => {
   expect(screen.getByText('3')).toBeInTheDocument();
 });
 
-test('renders attribute verdicts per attribute', () => {
+test('renders attribute verdicts per attribute after expanding row', () => {
   render(<ReportTable items={items} />);
+  // Expand the first row by clicking it
+  fireEvent.click(screen.getByText('Oscilloscope 200MHz').closest('tr')!);
   expect(screen.getByText('bandwidth')).toBeInTheDocument();
   expect(screen.getByText('channels')).toBeInTheDocument();
   expect(screen.getByText('COMPLIANT')).toBeInTheDocument();
   expect(screen.getByText('DEVIATION')).toBeInTheDocument();
 });
 
-test('renders alternatives with their score', () => {
+test('renders alternatives with their score after expanding row', () => {
   render(<ReportTable items={items} />);
+  // Expand the first row by clicking it
+  fireEvent.click(screen.getByText('Oscilloscope 200MHz').closest('tr')!);
   expect(screen.getByText(/Osc Lite 200/)).toBeInTheDocument();
-  expect(screen.getByText('60')).toBeInTheDocument();
+  expect(screen.getByText('score: 60')).toBeInTheDocument();
 });
 
-test('highlights not_found items', () => {
+test('highlights not_found items with slate badge', () => {
   render(<ReportTable items={items} />);
-  const notFound = screen.getByText('not_found');
-  expect(notFound.className).toContain('text-red');
+  // StatusBadge replaces underscore with space
+  const notFound = screen.getByText('not found');
+  expect(notFound.className).toContain('text-slate-600');
 });
 
 test('renders no price column', () => {
@@ -87,6 +92,8 @@ test('parses attributeVerdicts and alternatives delivered as JSON strings', () =
   ] as unknown as MatchResultItem[];
 
   render(<ReportTable items={raw} />);
+  // Expand the row to see the parsed content
+  fireEvent.click(screen.getByText('Oscilloscope 200MHz').closest('tr')!);
   expect(screen.getByText('bandwidth')).toBeInTheDocument();
   expect(screen.getByText(/Osc Lite 200/)).toBeInTheDocument();
 });

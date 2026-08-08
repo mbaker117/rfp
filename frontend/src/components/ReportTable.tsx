@@ -1,22 +1,6 @@
+'use client';
+import { Fragment, useState } from 'react';
 import type { MatchResultItem, AttributeVerdict, Alternative } from '@/src/lib/types';
-
-const scoreColor = (score: number) => {
-  if (score >= 80) return 'text-green-700';
-  if (score >= 40) return 'text-yellow-700';
-  return 'text-red-600';
-};
-
-const statusColor = (status: MatchResultItem['status']) => {
-  if (status === 'matched') return 'text-green-700 font-semibold';
-  if (status === 'partial') return 'text-yellow-700 font-semibold';
-  return 'text-red-600 font-semibold';
-};
-
-const verdictColor = (verdict: AttributeVerdict['verdict']) => {
-  if (verdict === 'COMPLIANT') return 'text-green-700';
-  if (verdict === 'DEVIATION') return 'text-red-600';
-  return 'text-gray-500';
-};
 
 // The backend stores attribute_verdicts / alternatives as jsonb and serializes
 // them as raw JSON strings, so accept either a parsed array or a string.
@@ -26,9 +10,7 @@ function asArray<T>(value: T[] | string | null | undefined): T[] {
     try {
       const parsed = JSON.parse(value);
       return Array.isArray(parsed) ? (parsed as T[]) : [];
-    } catch {
-      return [];
-    }
+    } catch { return []; }
   }
   return [];
 }
@@ -36,84 +18,120 @@ function asArray<T>(value: T[] | string | null | undefined): T[] {
 const show = (v: unknown) =>
   v === null || v === undefined ? '—' : typeof v === 'object' ? JSON.stringify(v) : String(v);
 
-function VerdictList({ verdicts }: { verdicts: AttributeVerdict[] }) {
-  if (verdicts.length === 0) return <span className="text-gray-400">—</span>;
+function StatusBadge({ status }: { status: MatchResultItem['status'] }) {
+  const cls = {
+    matched: 'bg-emerald-100 text-emerald-700',
+    partial: 'bg-amber-100 text-amber-700',
+    not_found: 'bg-slate-100 text-slate-600',
+  }[status];
   return (
-    <ul className="space-y-0.5">
-      {verdicts.map((v, i) => (
-        <li key={`${v.attr}-${i}`} className="whitespace-nowrap">
-          <span className="font-medium">{v.attr}</span>
-          <span className="text-gray-500">
-            {' '}
-            req {show(v.required)} / off {show(v.offered)}{' '}
-          </span>
-          <span className={verdictColor(v.verdict)}>{v.verdict}</span>
-        </li>
-      ))}
-    </ul>
+    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${cls}`}>
+      {status.replace('_', ' ')}
+    </span>
   );
 }
 
-function AlternativeList({ alternatives }: { alternatives: Alternative[] }) {
-  if (alternatives.length === 0) return <span className="text-gray-400">—</span>;
+function ScoreBar({ score }: { score: number }) {
+  const color = score >= 80 ? 'bg-emerald-500' : score >= 40 ? 'bg-amber-400' : 'bg-slate-300';
   return (
-    <ul className="space-y-0.5">
-      {alternatives.map(alt => (
-        <li key={alt.productId} className="whitespace-nowrap">
-          {alt.name}
-          {alt.mpn ? <span className="text-gray-500"> ({alt.mpn})</span> : null}
-          <span className={`ml-1 ${scoreColor(alt.score)}`}>{alt.score}</span>
-        </li>
-      ))}
-    </ul>
+    <div className="flex items-center gap-2">
+      <div className="w-16 h-1.5 bg-slate-100 rounded-full overflow-hidden">
+        <div className={`h-full rounded-full ${color}`} style={{ width: `${score}%` }} />
+      </div>
+      <span className="text-xs text-slate-600">{score}</span>
+    </div>
   );
 }
 
-interface Props {
-  items: MatchResultItem[];
+function ExpandedRow({ item }: { item: MatchResultItem }) {
+  const verdicts = asArray<AttributeVerdict>(item.attributeVerdicts);
+  const alts = asArray<Alternative>(item.alternatives);
+  return (
+    <tr>
+      <td colSpan={7} className="bg-slate-50 px-6 py-4 border-b border-slate-200">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {verdicts.length > 0 && (
+            <div>
+              <p className="text-xs font-medium uppercase tracking-wide text-slate-400 mb-2">Attribute Verdicts</p>
+              <table className="w-full text-xs">
+                <tbody>
+                  {verdicts.map((v, i) => (
+                    <tr key={`${v.attr}-${i}`} className="border-b border-slate-100 last:border-0">
+                      <td className="py-1 pr-2 font-medium text-slate-700">{v.attr}</td>
+                      <td className="py-1 pr-2 text-slate-500">req {show(v.required)}</td>
+                      <td className="py-1 pr-2 text-slate-500">off {show(v.offered)}</td>
+                      <td className={`py-1 font-medium ${
+                        v.verdict === 'COMPLIANT' ? 'text-emerald-600'
+                        : v.verdict === 'DEVIATION' ? 'text-red-600'
+                        : 'text-slate-400'
+                      }`}>{v.verdict}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {alts.length > 0 && (
+            <div>
+              <p className="text-xs font-medium uppercase tracking-wide text-slate-400 mb-2">Alternatives</p>
+              <ul className="space-y-1">
+                {alts.map(alt => (
+                  <li key={alt.productId} className="text-xs text-slate-700">
+                    {alt.name}
+                    {alt.mpn && <span className="text-slate-400 ml-1">({alt.mpn})</span>}
+                    <span className="ml-2 text-slate-500">score: {alt.score}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      </td>
+    </tr>
+  );
 }
 
-export function ReportTable({ items }: Props) {
+export function ReportTable({ items }: { items: MatchResultItem[] }) {
+  const [expanded, setExpanded] = useState<Set<number>>(new Set());
+
+  const toggle = (id: number) =>
+    setExpanded(prev => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full text-sm border-collapse">
-        <thead>
-          <tr className="bg-gray-100 text-left">
-            <th className="p-2 border">Requirement</th>
-            <th className="p-2 border">Qty</th>
-            <th className="p-2 border">Match Type</th>
-            <th className="p-2 border">Score</th>
-            <th className="p-2 border">Status</th>
-            <th className="p-2 border">Matched Product</th>
-            <th className="p-2 border">MPN</th>
-            <th className="p-2 border">Attribute Verdicts</th>
-            <th className="p-2 border">Alternatives</th>
+    <div className="overflow-x-auto rounded-xl border border-slate-200">
+      <table className="w-full text-sm">
+        <thead className="bg-slate-50 border-b border-slate-200">
+          <tr>
+            <th className="text-left px-4 py-3 text-xs font-medium uppercase tracking-wide text-slate-500">Requirement</th>
+            <th className="text-right px-4 py-3 text-xs font-medium uppercase tracking-wide text-slate-500">Qty</th>
+            <th className="px-4 py-3 text-xs font-medium uppercase tracking-wide text-slate-500">Type</th>
+            <th className="px-4 py-3 text-xs font-medium uppercase tracking-wide text-slate-500">Score</th>
+            <th className="px-4 py-3 text-xs font-medium uppercase tracking-wide text-slate-500">Status</th>
+            <th className="text-left px-4 py-3 text-xs font-medium uppercase tracking-wide text-slate-500">Matched Product</th>
+            <th className="text-left px-4 py-3 text-xs font-medium uppercase tracking-wide text-slate-500">MPN</th>
           </tr>
         </thead>
-        <tbody>
+        <tbody className="divide-y divide-slate-100">
           {items.map(item => (
-            <tr
-              key={item.lineId}
-              className={item.status === 'not_found' ? 'bg-red-50' : ''}
-            >
-              <td className="p-2 border">{item.description}</td>
-              <td className="p-2 border text-right">{item.qty ?? '—'}</td>
-              <td className="p-2 border text-center">{item.matchType ?? '—'}</td>
-              <td className={`p-2 border text-center ${scoreColor(item.score)}`}>
-                {item.score}
-              </td>
-              <td className={`p-2 border text-center ${statusColor(item.status)}`}>
-                {item.status}
-              </td>
-              <td className="p-2 border">{item.matchedProduct ?? '—'}</td>
-              <td className="p-2 border">{item.mpn ?? '—'}</td>
-              <td className="p-2 border text-xs">
-                <VerdictList verdicts={asArray<AttributeVerdict>(item.attributeVerdicts)} />
-              </td>
-              <td className="p-2 border text-xs">
-                <AlternativeList alternatives={asArray<Alternative>(item.alternatives)} />
-              </td>
-            </tr>
+            <Fragment key={item.lineId}>
+              <tr
+                onClick={() => toggle(item.lineId)}
+                className="hover:bg-slate-50 cursor-pointer transition-colors"
+              >
+                <td className="px-4 py-3 text-slate-900 max-w-xs truncate">{item.description}</td>
+                <td className="px-4 py-3 text-right text-slate-600">{item.qty ?? '—'}</td>
+                <td className="px-4 py-3 text-center text-slate-500 capitalize">{item.matchType ?? '—'}</td>
+                <td className="px-4 py-3"><ScoreBar score={item.score} /></td>
+                <td className="px-4 py-3"><StatusBadge status={item.status} /></td>
+                <td className="px-4 py-3 text-slate-700">{item.matchedProduct ?? '—'}</td>
+                <td className="px-4 py-3 text-slate-500 font-mono text-xs">{item.mpn ?? '—'}</td>
+              </tr>
+              {expanded.has(item.lineId) && <ExpandedRow item={item} />}
+            </Fragment>
           ))}
         </tbody>
       </table>

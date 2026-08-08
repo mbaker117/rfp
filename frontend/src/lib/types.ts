@@ -49,3 +49,31 @@ export interface JobStatus {
   status: 'PENDING' | 'RUNNING' | 'DONE' | 'FAILED';
   error?: string;
 }
+
+export interface AdminUser {
+  id: number;
+  username: string;
+  role: string;
+}
+
+export interface AdminProduct {
+  id: number;
+  name: string;
+  mpn: string | null;
+  supplierName: string;
+  productClass: string | null;
+  isStale: boolean;
+}
+
+export interface AdminTender {
+  id: number;
+  filename: string;
+  userId: number;
+  status: string;
+  createdAt: string;
+}
+
+export interface PageResult<T> {
+  content: T[];
+  totalElements: number;
+}

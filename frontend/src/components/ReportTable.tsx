@@ -26,7 +26,7 @@ function StatusBadge({ status }: { status: MatchResultItem['status'] }) {
   }[status];
   return (
     <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${cls}`}>
-      {status.replace('_', ' ')}
+      {status.replaceAll('_', ' ')}
     </span>
   );
 }
@@ -130,7 +130,7 @@ export function ReportTable({ items }: { items: MatchResultItem[] }) {
                 <td className="px-4 py-3 text-slate-700">{item.matchedProduct ?? '—'}</td>
                 <td className="px-4 py-3 text-slate-500 font-mono text-xs">{item.mpn ?? '—'}</td>
               </tr>
-              {expanded.has(item.lineId) && <ExpandedRow item={item} />}
+              {expanded.has(item.lineId) && <ExpandedRow key={`${item.lineId}-exp`} item={item} />}
             </Fragment>
           ))}
         </tbody>

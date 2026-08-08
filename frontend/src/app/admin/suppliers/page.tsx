@@ -43,10 +43,15 @@ export default function AdminSuppliersPage() {
   };
 
   const triggerScrape = async (id: number) => {
-    await fetch(`${BASE}/suppliers/${id}/catalog/scrape`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}` },
-    });
+    try {
+      const res = await fetch(`${BASE}/suppliers/${id}/catalog/scrape`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) throw new Error(`Scrape failed: ${res.status}`);
+    } catch (e) {
+      setError(String(e));
+    }
   };
 
   const uploadCatalog = async (id: number, file: File) => {

@@ -20,11 +20,21 @@ interface ProductRepository : JpaRepository<Product, Long> {
     fun findBySupplierIdAndNameIgnoreCase(supplierId: Long, name: String): Product?
     fun findBySupplierId(supplierId: Long): List<Product>
 
-    @Query("""
-        SELECT p FROM Product p
-        WHERE (:q IS NULL OR :q = ''
-               OR LOWER(p.name) LIKE LOWER(CONCAT('%', :q, '%'))
-               OR LOWER(COALESCE(p.mpn,'')) LIKE LOWER(CONCAT('%', :q, '%')))
-    """)
+    @Query(
+        value = """
+            SELECT p FROM Product p
+            JOIN FETCH p.supplier
+            LEFT JOIN FETCH p.productClass
+            WHERE (:q IS NULL OR :q = ''
+                   OR LOWER(p.name) LIKE LOWER(CONCAT('%', :q, '%'))
+                   OR LOWER(COALESCE(p.mpn,'')) LIKE LOWER(CONCAT('%', :q, '%')))
+        """,
+        countQuery = """
+            SELECT COUNT(p) FROM Product p
+            WHERE (:q IS NULL OR :q = ''
+                   OR LOWER(p.name) LIKE LOWER(CONCAT('%', :q, '%'))
+                   OR LOWER(COALESCE(p.mpn,'')) LIKE LOWER(CONCAT('%', :q, '%')))
+        """
+    )
     fun searchByNameOrMpn(q: String?, pageable: Pageable): Page<Product>
 }

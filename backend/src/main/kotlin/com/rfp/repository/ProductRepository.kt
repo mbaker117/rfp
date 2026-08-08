@@ -1,7 +1,10 @@
 package com.rfp.repository
 
 import com.rfp.domain.Product
+import org.springframework.data.domain.Page
+import org.springframework.data.domain.Pageable
 import org.springframework.data.jpa.repository.JpaRepository
+import org.springframework.data.jpa.repository.Query
 
 interface ProductRepository : JpaRepository<Product, Long> {
     fun findBySupplierIdInAndIsStaleAndNameIgnoreCase(
@@ -16,4 +19,12 @@ interface ProductRepository : JpaRepository<Product, Long> {
     fun findBySupplierIdAndMpnIgnoreCase(supplierId: Long, mpn: String): Product?
     fun findBySupplierIdAndNameIgnoreCase(supplierId: Long, name: String): Product?
     fun findBySupplierId(supplierId: Long): List<Product>
+
+    @Query("""
+        SELECT p FROM Product p
+        WHERE (:q IS NULL OR :q = ''
+               OR LOWER(p.name) LIKE LOWER(CONCAT('%', :q, '%'))
+               OR LOWER(COALESCE(p.mpn,'')) LIKE LOWER(CONCAT('%', :q, '%')))
+    """)
+    fun searchByNameOrMpn(q: String?, pageable: Pageable): Page<Product>
 }

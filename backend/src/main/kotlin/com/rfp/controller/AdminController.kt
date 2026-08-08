@@ -1,18 +1,76 @@
 package com.rfp.controller
 
 import com.rfp.job.CatalogRefreshJob
+import com.rfp.repository.AppUserRepository
+import com.rfp.repository.ProductRepository
+import com.rfp.repository.TenderRepository
+import org.springframework.data.domain.PageRequest
+import org.springframework.data.domain.Sort
 import org.springframework.http.ResponseEntity
-import org.springframework.web.bind.annotation.PostMapping
-import org.springframework.web.bind.annotation.RequestMapping
-import org.springframework.web.bind.annotation.RestController
+import org.springframework.web.bind.annotation.*
+
+data class UserDto(val id: Long, val username: String, val role: String)
+data class ProductDto(
+    val id: Long, val name: String, val mpn: String?,
+    val supplierName: String, val productClass: String?, val isStale: Boolean
+)
+data class TenderDto(
+    val id: Long, val filename: String, val userId: Long,
+    val status: String, val createdAt: String
+)
+data class PageResult<T>(val content: List<T>, val totalElements: Long)
 
 @RestController
 @RequestMapping("/admin")
-class AdminController(private val refreshJob: CatalogRefreshJob) {
+class AdminController(
+    private val refreshJob: CatalogRefreshJob,
+    private val userRepo: AppUserRepository,
+    private val productRepo: ProductRepository,
+    private val tenderRepo: TenderRepository
+) {
 
     @PostMapping("/refresh")
     fun triggerRefresh(): ResponseEntity<Map<String, String>> {
         refreshJob.refreshStaleSuppliers()
         return ResponseEntity.ok(mapOf("status" to "refresh enqueued"))
     }
+
+    @GetMapping("/users")
+    fun listUsers(): List<UserDto> =
+        userRepo.findAll().map { UserDto(it.id, it.username, it.role) }
+
+    @DeleteMapping("/users/{id}")
+    fun deleteUser(@PathVariable id: Long): ResponseEntity<Void> {
+        userRepo.deleteById(id)
+        return ResponseEntity.noContent().build()
+    }
+
+    @GetMapping("/products")
+    fun listProducts(
+        @RequestParam(defaultValue = "0") page: Int,
+        @RequestParam(defaultValue = "50") size: Int,
+        @RequestParam(required = false) q: String?
+    ): PageResult<ProductDto> {
+        val pageable = PageRequest.of(page, size, Sort.by("name"))
+        val result = productRepo.searchByNameOrMpn(q, pageable)
+        return PageResult(
+            content = result.content.map { p ->
+                ProductDto(
+                    id = p.id,
+                    name = p.name,
+                    mpn = p.mpn,
+                    supplierName = p.supplier.name,
+                    productClass = p.productClass?.name,
+                    isStale = p.isStale
+                )
+            },
+            totalElements = result.totalElements
+        )
+    }
+
+    @GetMapping("/tenders")
+    fun listTenders(): List<TenderDto> =
+        tenderRepo.findAll(Sort.by(Sort.Direction.DESC, "createdAt")).map { t ->
+            TenderDto(t.id, t.filename, t.userId, t.status, t.createdAt.toString())
+        }
 }

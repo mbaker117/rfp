@@ -152,8 +152,8 @@ open class MatchingEngineService(
     }
 
     // I2/I3: type-safe comparison; returns UNVERIFIABLE when values can't be parsed
-    private fun evalVerdict(def: AttributeDef, required: Any, offered: Any): String =
-        when (def.matchOp) {
+    private fun evalVerdict(def: AttributeDef, required: Any, offered: Any): String {
+        return when (def.matchOp) {
             "eq" -> when (def.datatype) {
                 "numeric" -> {
                     val r = toDoubleOrNull(required) ?: return "UNVERIFIABLE"
@@ -177,6 +177,7 @@ open class MatchingEngineService(
             }
             else -> "UNVERIFIABLE"
         }
+    }
 
     private fun toDoubleOrNull(v: Any): Double? = when (v) {
         is Number -> v.toDouble()

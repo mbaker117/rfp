@@ -60,7 +60,7 @@ export default function AdminProductsPage() {
                 <td className="px-4 py-3 text-slate-500">{p.productClass ?? '—'}</td>
                 <td className="px-4 py-3">
                   {p.isStale && (
-                    <span className="bg-amber-100 text-amber-700 text-xs rounded-full px-2 py-0.5">stale</span>
+                    <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-700">stale</span>
                   )}
                 </td>
               </tr>

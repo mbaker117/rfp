@@ -96,10 +96,11 @@ export const api = {
       return json<AdminUser[]>(res);
     },
     async deleteUser(id: number, token: string): Promise<void> {
-      await fetch(`${BASE}/admin/users/${id}`, {
+      const res = await fetch(`${BASE}/admin/users/${id}`, {
         method: 'DELETE',
         headers: authHeaders(token),
       });
+      if (!res.ok) throw new Error(`API error ${res.status}`);
     },
     async listProducts(
       token: string,

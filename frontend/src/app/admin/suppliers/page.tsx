@@ -8,9 +8,10 @@ import { useAuth } from '@/src/hooks/useAuth';
 const BASE = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080';
 
 function ScrapeBadge({ status }: { status: string }) {
-  const cls = status === 'done' ? 'bg-emerald-100 text-emerald-700'
-    : status === 'failed' ? 'bg-red-100 text-red-700'
-    : status === 'running' ? 'bg-amber-100 text-amber-700'
+  const s = status.toLowerCase();
+  const cls = s === 'done' ? 'bg-emerald-100 text-emerald-700'
+    : s === 'failed' ? 'bg-red-100 text-red-700'
+    : s === 'running' ? 'bg-amber-100 text-amber-700'
     : 'bg-slate-100 text-slate-500';
   return (
     <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${cls}`}>

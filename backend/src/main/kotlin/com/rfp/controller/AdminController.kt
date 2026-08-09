@@ -12,6 +12,7 @@ import org.springframework.web.bind.annotation.*
 data class UserDto(val id: Long, val username: String, val role: String)
 data class ProductDto(
     val id: Long, val name: String, val mpn: String?,
+    val supplierId: Long,
     val supplierName: String, val productClass: String?, val isStale: Boolean
 )
 data class TenderDto(
@@ -40,7 +41,11 @@ class AdminController(
         userRepo.findAll().map { UserDto(it.id, it.username, it.role) }
 
     @DeleteMapping("/users/{id}")
-    fun deleteUser(@PathVariable id: Long): ResponseEntity<Void> {
+    fun deleteUser(@PathVariable id: Long): ResponseEntity<Any> {
+        val tenders = tenderRepo.findAll().filter { it.userId == id }
+        if (tenders.isNotEmpty()) {
+            return ResponseEntity.status(409).body(mapOf("error" to "User has ${tenders.size} tender(s) and cannot be deleted"))
+        }
         userRepo.deleteById(id)
         return ResponseEntity.noContent().build()
     }
@@ -59,6 +64,7 @@ class AdminController(
                     id = p.id,
                     name = p.name,
                     mpn = p.mpn,
+                    supplierId = p.supplier.id,
                     supplierName = p.supplier.name,
                     productClass = p.productClass?.name,
                     isStale = p.isStale

@@ -17,11 +17,12 @@ export default function AdminUsersPage() {
 
   const remove = async (id: number) => {
     if (!confirm('Delete this user?')) return;
+    setError('');
     try {
       await api.admin.deleteUser(id, token);
       setUsers(prev => prev.filter(u => u.id !== id));
     } catch (e) {
-      setError(String(e));
+      setError(e instanceof Error ? e.message : String(e));
     }
   };
 

@@ -1,4 +1,4 @@
-import type { Supplier, RfpReport, AdminUser, AdminProduct, AdminTender, PageResult } from './types';
+import type { Supplier, RfpReport, AdminUser, AdminProduct, AdminTender, PageResult, IngestRecord } from './types';
 
 const BASE = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080';
 
@@ -48,7 +48,7 @@ export const api = {
     return json<Supplier>(res);
   },
 
-  async uploadCatalog(supplierId: number, file: File, token: string): Promise<{ jobId: string }> {
+  async uploadCatalog(supplierId: number, file: File, token: string): Promise<{ supplierId: number; status: string }> {
     const form = new FormData();
     form.append('file', file);
     const res = await fetch(`${BASE}/suppliers/${supplierId}/catalog/upload`, {
@@ -56,7 +56,7 @@ export const api = {
       headers: { Authorization: `Bearer ${token}` },
       body: form,
     });
-    return json<{ jobId: string }>(res);
+    return json<{ supplierId: number; status: string }>(res);
   },
 
   async uploadRfp(
@@ -100,7 +100,10 @@ export const api = {
         method: 'DELETE',
         headers: authHeaders(token),
       });
-      if (!res.ok) throw new Error(`API error ${res.status}`);
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({})) as { error?: string };
+        throw new Error(body.error ?? `API error ${res.status}`);
+      }
     },
     async listProducts(
       token: string,
@@ -118,6 +121,10 @@ export const api = {
     async listTenders(token: string): Promise<AdminTender[]> {
       const res = await fetch(`${BASE}/admin/tenders`, { headers: authHeaders(token) });
       return json<AdminTender[]>(res);
+    },
+    async listIngests(supplierId: number, token: string): Promise<IngestRecord[]> {
+      const res = await fetch(`${BASE}/suppliers/${supplierId}/ingests`, { headers: authHeaders(token) });
+      return json<IngestRecord[]>(res);
     },
   },
 };

@@ -2,6 +2,7 @@
 package com.rfp.controller
 
 import com.rfp.domain.Supplier
+import com.rfp.repository.CatalogIngestRepository
 import com.rfp.repository.SupplierRepository
 import com.rfp.service.CatalogIngestService
 import org.springframework.beans.factory.annotation.Autowired
@@ -32,9 +33,17 @@ fun Supplier.toResponse() = SupplierResponse(
     country, description, categories.toList(), scrapeStatus
 )
 
+data class IngestDto(
+    val id: Long, val kind: String, val filename: String?,
+    val status: String, val startedAt: String?, val finishedAt: String?
+)
+
 @RestController
 @RequestMapping("/suppliers")
-class SupplierController(private val repo: SupplierRepository) {
+class SupplierController(
+    private val repo: SupplierRepository,
+    private val catalogIngestRepo: CatalogIngestRepository
+) {
 
     @Autowired
     private lateinit var catalogIngestService: CatalogIngestService
@@ -98,5 +107,11 @@ class SupplierController(private val repo: SupplierRepository) {
         repo.findById(id).orElse(null) ?: return ResponseEntity.notFound().build()
         catalogIngestService.ingestScrape(id)
         return ResponseEntity.ok(mapOf("supplierId" to id, "status" to "scrape_started"))
+    }
+
+    @GetMapping("/{id}/ingests")
+    fun listIngests(@PathVariable id: Long, @RequestHeader("Authorization") auth: String): ResponseEntity<List<IngestDto>> {
+        val ingests = catalogIngestRepo.findBySupplierId(id)
+        return ResponseEntity.ok(ingests.map { IngestDto(it.id, it.kind, it.filename, it.status, it.startedAt?.toString(), it.finishedAt?.toString()) })
     }
 }

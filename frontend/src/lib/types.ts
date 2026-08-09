@@ -60,9 +60,19 @@ export interface AdminProduct {
   id: number;
   name: string;
   mpn: string | null;
+  supplierId: number;
   supplierName: string;
   productClass: string | null;
   isStale: boolean;
+}
+
+export interface IngestRecord {
+  id: number;
+  kind: string;
+  filename: string | null;
+  status: string;
+  startedAt: string | null;
+  finishedAt: string | null;
 }
 
 export interface AdminTender {

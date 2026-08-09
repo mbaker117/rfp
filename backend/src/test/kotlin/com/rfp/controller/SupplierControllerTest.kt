@@ -2,6 +2,7 @@
 package com.rfp.controller
 
 import com.rfp.domain.Supplier
+import com.rfp.repository.CatalogIngestRepository
 import com.rfp.repository.SupplierRepository
 import io.mockk.every
 import io.mockk.mockk
@@ -11,7 +12,8 @@ import java.util.Optional
 
 class SupplierControllerTest {
     private val repo = mockk<SupplierRepository>()
-    private val controller = SupplierController(repo)
+    private val catalogIngestRepo = mockk<CatalogIngestRepository>()
+    private val controller = SupplierController(repo, catalogIngestRepo)
 
     @Test
     fun `register saves and returns supplier`() {

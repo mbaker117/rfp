@@ -30,10 +30,12 @@ class PlaywrightRenderer(
     destinationValidator: DestinationValidator,
     private val robotsPolicy: RobotsPolicyService,
     private val nanoTimeSource: NanoTimeSource = SystemNanoTimeSource,
+    private val closeTimeout: Duration = DEFAULT_CLOSE_TIMEOUT,
     private val playwrightFactory: () -> Playwright = { Playwright.create() },
 ) {
     private val transport = ValidatedHttpTransport(client, destinationValidator)
     private val workerMonitor = Any()
+    private val retiredWorkers = mutableSetOf<RendererWorker>()
 
     @Volatile private var worker: RendererWorker? = null
     @Volatile private var closed = false
@@ -50,16 +52,26 @@ class PlaywrightRenderer(
         if (fetch.contentType != "text/html" && fetch.contentType != "application/xhtml+xml") return fetch
         if (!parserRequiresJavaScript && meaningfulTextLength(fetch) >= meaningfulContentThreshold) return fetch
         val deadline = DeadlineBudget.start(maximumWait, nanoTimeSource)
-        val selectedWorker = synchronized(workerMonitor) {
+        val submission = synchronized(workerMonitor) {
             if (closed) return FetchResult.Rejected(FetchError.NETWORK_FAILURE)
-            worker ?: RendererWorker().also { worker = it }
+            val selectedWorker = worker ?: run {
+                if (retiredWorkers.isNotEmpty()) return FetchResult.Rejected(FetchError.TIMEOUT)
+                RendererWorker().also { worker = it }
+            }
+            try {
+                WorkerSubmission(
+                    selectedWorker,
+                    selectedWorker.submit { render(selectedWorker, fetch.url, request, deadline) },
+                )
+            } catch (_: RejectedExecutionException) {
+                if (worker === selectedWorker) worker = null
+                return FetchResult.Rejected(
+                    if (deadline.isExpired()) FetchError.TIMEOUT else FetchError.NETWORK_FAILURE,
+                )
+            }
         }
-        val ticket = try {
-            selectedWorker.submit { render(selectedWorker, fetch.url, request, deadline) }
-        } catch (_: RejectedExecutionException) {
-            retire(selectedWorker)
-            return FetchResult.Rejected(if (deadline.isExpired()) FetchError.TIMEOUT else FetchError.NETWORK_FAILURE)
-        }
+        val selectedWorker = submission.worker
+        val ticket = submission.ticket
         val remainingNanos = deadline.remainingNanos()
         if (remainingNanos <= 0) {
             timeout(selectedWorker, ticket)
@@ -272,11 +284,17 @@ class PlaywrightRenderer(
 
     @PreDestroy
     fun close() {
-        val existing = synchronized(workerMonitor) {
+        val workersToClose = synchronized(workerMonitor) {
             closed = true
-            worker.also { worker = null }
+            buildSet {
+                worker?.let(::add)
+                addAll(retiredWorkers)
+            }.also {
+                worker = null
+                retiredWorkers += it
+            }
         }
-        existing?.closeGracefully()
+        workersToClose.forEach(RendererWorker::closeGracefully)
     }
 
     private fun timeout(rendererWorker: RendererWorker, ticket: RenderTicket) {
@@ -289,6 +307,13 @@ class PlaywrightRenderer(
     private fun retire(rendererWorker: RendererWorker) {
         synchronized(workerMonitor) {
             if (worker === rendererWorker) worker = null
+            retiredWorkers += rendererWorker
+        }
+    }
+
+    private fun retirementComplete(rendererWorker: RendererWorker) {
+        synchronized(workerMonitor) {
+            retiredWorkers -= rendererWorker
         }
     }
 
@@ -309,8 +334,11 @@ class PlaywrightRenderer(
                 try {
                     task()
                 } finally {
-                    if (poisoned.get()) closeLifecycle()
-                    finished.countDown()
+                    try {
+                        if (poisoned.get()) closeLifecycle()
+                    } finally {
+                        finished.countDown()
+                    }
                 }
             }
             return RenderTicket(future, started, finished)
@@ -340,8 +368,7 @@ class PlaywrightRenderer(
         }
 
         fun abort() {
-            if (!poisoned.compareAndSet(false, true)) return
-            processGuard.terminate()
+            if (poisoned.compareAndSet(false, true)) processGuard.terminate()
             executor.shutdownNow()
         }
 
@@ -353,26 +380,30 @@ class PlaywrightRenderer(
             val cleanup = try {
                 executor.submit { closeLifecycle() }
             } catch (_: RejectedExecutionException) {
-                processGuard.terminate()
+                abort()
                 return
             }
             try {
-                cleanup.get(CLOSE_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS)
+                cleanup.get(closeTimeout.toMillis(), TimeUnit.MILLISECONDS)
             } catch (_: Exception) {
-                processGuard.terminate()
-                cleanup.cancel(true)
+                abort()
+                cleanup.cancel(false)
             } finally {
                 executor.shutdownNow()
             }
         }
 
         private fun closeLifecycle() {
-            val browserToClose = workerBrowser
-            workerBrowser = null
-            runCatching { browserToClose?.close() }
-            val playwrightToClose = workerPlaywright
-            workerPlaywright = null
-            runCatching { playwrightToClose?.close() }
+            try {
+                val browserToClose = workerBrowser
+                workerBrowser = null
+                runCatching { browserToClose?.close() }
+                val playwrightToClose = workerPlaywright
+                workerPlaywright = null
+                runCatching { playwrightToClose?.close() }
+            } finally {
+                retirementComplete(this)
+            }
         }
     }
 
@@ -382,10 +413,12 @@ class PlaywrightRenderer(
         val finished: CountDownLatch,
     )
 
+    private data class WorkerSubmission(
+        val worker: RendererWorker,
+        val ticket: RenderTicket,
+    )
+
     private class PlaywrightProcessGuard {
-        private val baselineChildren = ProcessHandle.current().children().use { children ->
-            children.toList().mapTo(mutableSetOf()) { it.pid() }
-        }
         private val driverProcess = AtomicReference<ProcessHandle?>()
 
         fun capture(playwright: Playwright) {
@@ -400,37 +433,18 @@ class PlaywrightRenderer(
         }
 
         fun terminate() {
-            val captured = driverProcess.getAndSet(null)
-            val roots = if (captured != null) {
-                listOf(captured)
-            } else {
-                ProcessHandle.current().children().use { children ->
-                    children.filter { it.pid() !in baselineChildren && it.looksLikePlaywrightDriver() }.toList()
-                }
+            val root = driverProcess.getAndSet(null) ?: return
+            val descendants = runCatching { root.descendants().toList() }.getOrDefault(emptyList())
+            descendants.asReversed().forEach { handle ->
+                if (handle.isAlive) runCatching { handle.destroyForcibly() }
             }
-            roots.forEach { root ->
-                val descendants = runCatching { root.descendants().toList() }.getOrDefault(emptyList())
-                descendants.asReversed().forEach { handle ->
-                    if (handle.isAlive) runCatching { handle.destroyForcibly() }
-                }
-                if (root.isAlive) runCatching { root.destroyForcibly() }
-            }
-        }
-
-        private fun ProcessHandle.looksLikePlaywrightDriver(): Boolean {
-            val info = info()
-            val commandLine = info.commandLine().orElse("")
-            val arguments = info.arguments().orElse(emptyArray()).joinToString(" ")
-            return commandLine.contains("playwright", ignoreCase = true) ||
-                commandLine.contains("run-driver", ignoreCase = true) ||
-                arguments.contains("playwright", ignoreCase = true) ||
-                arguments.contains("run-driver", ignoreCase = true)
+            if (root.isAlive) runCatching { root.destroyForcibly() }
         }
     }
 
     companion object {
         private val WORKER_IDS = AtomicLong()
-        private val CLOSE_TIMEOUT = Duration.ofSeconds(5)
+        private val DEFAULT_CLOSE_TIMEOUT = Duration.ofSeconds(5)
         private const val MAX_ROUTED_REQUESTS = 64L
         private const val MAX_SUBRESOURCE_BYTES = 1024L * 1024L
         private val ALLOWED_RESOURCE_TYPES = setOf("document", "script", "stylesheet", "xhr", "fetch")

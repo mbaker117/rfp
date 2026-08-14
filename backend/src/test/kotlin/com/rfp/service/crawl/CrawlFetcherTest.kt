@@ -29,6 +29,8 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import java.util.function.Consumer
 
 class CrawlFetcherTest {
@@ -637,6 +639,128 @@ class CrawlFetcherTest {
     }
 
     @Test
+    fun `timed out Playwright creation keeps unrelated process alive and blocks replacement generation`() {
+        server.dispatcher = pathDispatcher(
+            mapOf(
+                "/robots.txt" to MockResponse().setBody("User-agent: *\nAllow: /"),
+                "/product" to MockResponse().setHeader("Content-Type", "text/html").setBody("<html></html>"),
+            ),
+        )
+        val firstFactoryEntered = CountDownLatch(1)
+        val releaseFirstFactory = CountDownLatch(1)
+        val firstPlaywrightClosed = CountDownLatch(1)
+        val factoryCalls = AtomicInteger()
+        val firstPlaywright = mockk<Playwright>()
+        every { firstPlaywright.close() } answers { firstPlaywrightClosed.countDown() }
+        val replacementContext = mockContext("<html>replacement</html>")
+        val replacementPlaywright = mockPlaywright(replacementContext)
+        val renderer = PlaywrightRenderer(client, policy, robotsService()) {
+            if (factoryCalls.incrementAndGet() == 1) {
+                firstFactoryEntered.countDown()
+                awaitUninterruptibly(releaseFirstFactory)
+                firstPlaywright
+            } else {
+                replacementPlaywright
+            }
+        }
+        val renderExecutor = Executors.newSingleThreadExecutor()
+        val firstRender = renderExecutor.submit<FetchResult> {
+            renderer.renderIfNeeded(
+                sparseFetch(), request("/product"), parserRequiresJavaScript = true,
+                maximumWait = Duration.ofMillis(800),
+            )
+        }
+        assertThat(firstFactoryEntered.await(1, TimeUnit.SECONDS)).isTrue()
+        var unrelatedProcess: Process? = null
+
+        try {
+            val process = startUnrelatedPlaywrightNamedProcess()
+            unrelatedProcess = process
+            assertThat(process.inputStream.bufferedReader().readLine()).isEqualTo("READY")
+            assertThat(process.isAlive).isTrue()
+            val firstResult = firstRender.get(2, TimeUnit.SECONDS)
+            val secondResult = renderer.renderIfNeeded(
+                sparseFetch(), request("/product"), parserRequiresJavaScript = true,
+                maximumWait = Duration.ofSeconds(1),
+            )
+            val unrelatedExitedAfterTimeout = process.waitFor(250, TimeUnit.MILLISECONDS)
+
+            assertThat(firstResult).isEqualTo(FetchResult.Rejected(FetchError.TIMEOUT))
+            assertThat(unrelatedExitedAfterTimeout).isFalse()
+            assertThat(secondResult).isEqualTo(FetchResult.Rejected(FetchError.TIMEOUT))
+            assertThat(factoryCalls.get()).isEqualTo(1)
+        } finally {
+            releaseFirstFactory.countDown()
+            assertThat(firstPlaywrightClosed.await(1, TimeUnit.SECONDS)).isTrue()
+            renderer.close()
+            renderExecutor.shutdownNow()
+            unrelatedProcess?.destroyForcibly()
+            unrelatedProcess?.waitFor(1, TimeUnit.SECONDS)
+        }
+    }
+
+    @Test
+    fun `forced renderer close poisons active worker and closes lifecycle on owner thread`() {
+        server.dispatcher = pathDispatcher(
+            mapOf(
+                "/robots.txt" to MockResponse().setBody("User-agent: *\nAllow: /"),
+                "/product" to MockResponse().setHeader("Content-Type", "text/html").setBody("<html></html>"),
+            ),
+        )
+        val context = mockContext("<html>rendered</html>")
+        val page = renderedPages.last()
+        val blockingCallEntered = CountDownLatch(1)
+        val releaseBlockingCall = CountDownLatch(1)
+        val browserClosed = CountDownLatch(1)
+        val playwrightClosed = CountDownLatch(1)
+        val renderingThread = AtomicReference<Thread>()
+        val browserCloseThread = AtomicReference<Thread>()
+        val playwrightCloseThread = AtomicReference<Thread>()
+        every { page.content() } answers {
+            renderingThread.set(Thread.currentThread())
+            blockingCallEntered.countDown()
+            awaitUninterruptibly(releaseBlockingCall)
+            "<html>rendered</html>"
+        }
+        val harness = rendererHarness(context, closeTimeout = Duration.ofMillis(100))
+        every { harness.browser.close() } answers {
+            browserCloseThread.set(Thread.currentThread())
+            browserClosed.countDown()
+        }
+        every { harness.playwright.close() } answers {
+            playwrightCloseThread.set(Thread.currentThread())
+            playwrightClosed.countDown()
+        }
+        val renderExecutor = Executors.newSingleThreadExecutor()
+        val render = renderExecutor.submit<FetchResult> {
+            harness.renderer.renderIfNeeded(
+                sparseFetch(), request("/product"), parserRequiresJavaScript = true,
+                maximumWait = Duration.ofSeconds(3),
+            )
+        }
+        assertThat(blockingCallEntered.await(1, TimeUnit.SECONDS)).isTrue()
+
+        try {
+            val closeStartedAt = System.nanoTime()
+            harness.close()
+            val closeElapsed = Duration.ofNanos(System.nanoTime() - closeStartedAt)
+
+            assertThat(closeElapsed).isLessThan(Duration.ofSeconds(1))
+            assertThat(browserClosed.count).isEqualTo(1)
+            assertThat(playwrightClosed.count).isEqualTo(1)
+            releaseBlockingCall.countDown()
+            render.get(2, TimeUnit.SECONDS)
+            assertThat(browserClosed.await(1, TimeUnit.SECONDS)).isTrue()
+            assertThat(playwrightClosed.await(1, TimeUnit.SECONDS)).isTrue()
+            assertThat(browserCloseThread.get()).isSameAs(renderingThread.get())
+            assertThat(playwrightCloseThread.get()).isSameAs(renderingThread.get())
+        } finally {
+            releaseBlockingCall.countDown()
+            renderExecutor.shutdownNow()
+        }
+    }
+
+    @Test
     fun `renderer rejects an invalid script MIME from a captured route`() {
         server.dispatcher = pathDispatcher(
             mapOf(
@@ -895,6 +1019,7 @@ class CrawlFetcherTest {
         context: BrowserContext,
         nanoTimeSource: NanoTimeSource = SystemNanoTimeSource,
         additionalContexts: List<BrowserContext> = emptyList(),
+        closeTimeout: Duration = Duration.ofSeconds(5),
     ): RendererHarness {
         val playwright = mockk<Playwright>()
         val browserType = mockk<BrowserType>()
@@ -905,12 +1030,48 @@ class CrawlFetcherTest {
         every { browser.close() } just Runs
         every { playwright.close() } just Runs
         return RendererHarness(
-            renderer = PlaywrightRenderer(client, policy, robotsService(), nanoTimeSource = nanoTimeSource) {
+            renderer = PlaywrightRenderer(
+                client, policy, robotsService(), nanoTimeSource = nanoTimeSource, closeTimeout = closeTimeout,
+            ) {
                 playwright
             },
             browser = browser,
             playwright = playwright,
         )
+    }
+
+    private fun mockPlaywright(context: BrowserContext): Playwright {
+        val playwright = mockk<Playwright>()
+        val browserType = mockk<BrowserType>()
+        val browser = mockk<Browser>()
+        every { playwright.chromium() } returns browserType
+        every { browserType.launch(any()) } returns browser
+        every { browser.newContext(any()) } returns context
+        every { browser.close() } just Runs
+        every { playwright.close() } just Runs
+        return playwright
+    }
+
+    private fun startUnrelatedPlaywrightNamedProcess(): Process = ProcessBuilder(
+        ProcessHandle.current().info().command().orElseThrow(),
+        "-cp",
+        System.getProperty("surefire.test.class.path", System.getProperty("java.class.path")),
+        PlaywrightUnrelatedProcess::class.java.name,
+    )
+        .redirectError(ProcessBuilder.Redirect.DISCARD)
+        .start()
+
+    private fun awaitUninterruptibly(latch: CountDownLatch) {
+        var interrupted = false
+        while (true) {
+            try {
+                latch.await()
+                break
+            } catch (_: InterruptedException) {
+                interrupted = true
+            }
+        }
+        if (interrupted) Thread.currentThread().interrupt()
     }
 
     private data class TestRoute(val path: String, val resourceType: String, val mainFrame: Boolean = true)
@@ -932,4 +1093,13 @@ class CrawlFetcherTest {
     }
 
     private val renderedPages = mutableListOf<Page>()
+}
+
+object PlaywrightUnrelatedProcess {
+    @JvmStatic
+    fun main(args: Array<String>) {
+        println("READY")
+        System.out.flush()
+        Thread.sleep(TimeUnit.SECONDS.toMillis(30))
+    }
 }

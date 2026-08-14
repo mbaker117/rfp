@@ -48,6 +48,14 @@ export const api = {
     return json<Supplier>(res);
   },
 
+  async triggerScrape(supplierId: number, token: string): Promise<{ supplierId: number; status: string }> {
+    const res = await fetch(`${BASE}/suppliers/${supplierId}/catalog/scrape`, {
+      method: 'POST',
+      headers: authHeaders(token),
+    });
+    return json<{ supplierId: number; status: string }>(res);
+  },
+
   async uploadCatalog(supplierId: number, file: File, token: string): Promise<{ supplierId: number; status: string }> {
     const form = new FormData();
     form.append('file', file);

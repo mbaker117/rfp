@@ -21,6 +21,13 @@ export default function Home() {
   const [catalogLoading, setCatalogLoading] = useState(false);
   const [showCombobox, setShowCombobox] = useState(false);
 
+  // Step 2 — scrape website
+  const [scrapeUrl, setScrapeUrl] = useState('');
+  const [scrapeLoading, setScrapeLoading] = useState(false);
+  const [scrapeSupplierId, setScrapeSupplierId] = useState<number | null>(null);
+  const [scrapeSupplierName, setScrapeSupplierName] = useState('');
+  const [showScrapeInput, setShowScrapeInput] = useState(false);
+
   // Step 2 — combobox (existing suppliers)
   const [suppliers, setSuppliers] = useState<SelectedSupplier[]>([]);
 
@@ -50,9 +57,35 @@ export default function Home() {
     setCatalogSupplierId(null);
   };
 
+  const handleScrapeUrl = async () => {
+    const url = scrapeUrl.trim();
+    if (!url) return;
+    setScrapeLoading(true);
+    setError('');
+    try {
+      const domain = new URL(url).hostname.replace(/^www\./, '');
+      const supplier = await api.registerSupplier({ name: domain, officialWebsite: url }, token);
+      await api.triggerScrape(supplier.id, token);
+      setScrapeSupplierId(supplier.id);
+      setScrapeSupplierName(domain);
+      setShowScrapeInput(false);
+    } catch (e) {
+      setError('Could not start scraping — ' + String(e));
+    } finally {
+      setScrapeLoading(false);
+    }
+  };
+
+  const removeScrape = () => {
+    setScrapeSupplierId(null);
+    setScrapeSupplierName('');
+    setScrapeUrl('');
+  };
+
   const allSupplierIds = [
     ...suppliers.map(s => s.id),
     ...(catalogSupplierId !== null ? [catalogSupplierId] : []),
+    ...(scrapeSupplierId !== null ? [scrapeSupplierId] : []),
   ];
   const hasSupplier = allSupplierIds.length > 0;
 
@@ -180,11 +213,51 @@ export default function Home() {
                 </div>
               )}
 
-              <div className="border-t border-slate-100 pt-2">
+              {/* Scrape badge */}
+              {scrapeSupplierId !== null && (
+                <div className="flex items-center gap-2 text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                  <span>🔍</span>
+                  <span className="flex-1 truncate">Scraping {scrapeSupplierName}… (runs in background)</span>
+                  <button onClick={removeScrape} className="text-amber-400 hover:text-red-500 transition-colors" aria-label="Remove scrape">✕</button>
+                </div>
+              )}
+
+              <div className="border-t border-slate-100 pt-2 space-y-1">
+                {scrapeSupplierId === null && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => { setShowScrapeInput(v => !v); setShowCombobox(false); }}
+                      className="text-xs text-slate-500 hover:text-indigo-600 transition-colors block"
+                    >
+                      {showScrapeInput ? '← hide' : 'or scrape a supplier website →'}
+                    </button>
+                    {showScrapeInput && (
+                      <div className="mt-2 flex gap-2">
+                        <input
+                          type="url"
+                          value={scrapeUrl}
+                          onChange={e => setScrapeUrl(e.target.value)}
+                          onKeyDown={e => { if (e.key === 'Enter') handleScrapeUrl(); }}
+                          placeholder="https://supplier-website.com"
+                          className="flex-1 border border-slate-300 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                        />
+                        <button
+                          type="button"
+                          onClick={handleScrapeUrl}
+                          disabled={scrapeLoading || !scrapeUrl.trim()}
+                          className="px-3 py-1.5 bg-indigo-600 text-white text-sm rounded-md hover:bg-indigo-700 disabled:opacity-40 transition-colors"
+                        >
+                          {scrapeLoading ? '…' : 'Scrape'}
+                        </button>
+                      </div>
+                    )}
+                  </>
+                )}
                 <button
                   type="button"
-                  onClick={() => setShowCombobox(v => !v)}
-                  className="text-xs text-slate-500 hover:text-indigo-600 transition-colors"
+                  onClick={() => { setShowCombobox(v => !v); setShowScrapeInput(false); }}
+                  className="text-xs text-slate-500 hover:text-indigo-600 transition-colors block"
                 >
                   {showCombobox ? '← hide' : 'or choose an existing supplier →'}
                 </button>

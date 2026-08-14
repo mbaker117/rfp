@@ -121,7 +121,7 @@ Result: exit code 0.
 - Confirmed robots failures are bounded by `maxAttempts` and fail closed.
 - Confirmed the robots cache is origin-scoped, expires, and does not leak one agent's parsed rules to another agent.
 - Confirmed known and chunked/unknown-length bodies are bounded before unrestricted allocation.
-- Confirmed unsupported MIME types are rejected before reading their body.
+- Confirmed unsupported MIME types are rejected and never returned as crawl content.
 - Confirmed `304` responses preserve stored body, content type, validators, and content hash.
 - Confirmed the browser is shared while contexts are isolated and closed per render, and `@PreDestroy` closes shared resources.
 - Confirmed the DOM wait uses stabilization checks under an absolute maximum rather than `NETWORKIDLE`.
@@ -131,3 +131,58 @@ Result: exit code 0.
 
 - Task 3 produces the new fetcher and renderer but intentionally does not replace the legacy fetch logic in `ScrapeService`; wiring occurs in the later orchestration task. That wiring must register a single `PlaywrightRenderer` per application worker so its `@PreDestroy` lifecycle is active.
 - Playwright binaries are not launched in unit tests; lifecycle and routing orchestration are tested through Playwright interfaces. A later integration test should exercise a local JavaScript fixture after the renderer is wired into the crawl worker.
+
+## Review Fix Round 1
+
+### Boundary Changes
+
+- Added `ValidatedHttpTransport`, which executes exactly one HTTP hop after a `DestinationValidator` decision. It snapshots the decision's exact resolved addresses into an OkHttp `Dns`, preserves the original URI hostname for Host/TLS SNI, disables proxying, connection reuse, automatic redirects, and retries, applies a total call deadline, streams under a byte ceiling, and closes every response.
+- Routed robots retrieval through that same validated transport. Robots redirects are canonicalized and followed manually with a hop/loop bound; authorization scope is retained; results are cached under the requesting origin and scope. Retrieval now uses per-origin single-flight locks, short failure caching, bounded exponential backoff with jitter, and retryable `408`/`429`/`5xx` decisions with `Retry-After` metadata.
+- Made stored representations identity-aware with a canonical effective URL. Validators are sent only to that identity, never carried across redirects, and a `304` revalidates both the current byte limit and MIME before reuse.
+- Made MIME normalization locale-independent and accepted registered structured `+xml` and `+json` types alongside the approved text/document types.
+- Closed Chromium's direct egress by launching it against a dead local proxy and blocking service workers. Every allowed HTTP(S) document, script, stylesheet, XHR, and fetch route is fulfilled only from the validated Java transport; disallowed resource types are aborted. Per-response, request-count, aggregate-byte, final-status, final-MIME, and pre-JVM DOM byte bounds are enforced. DOM stabilization remains inside one hard maximum.
+
+### Round 1 TDD Evidence
+
+Initial focused redesign command:
+
+```powershell
+& 'C:\Users\moham\.m2\wrapper\dists\apache-maven-3.8.6-bin\1ks0nkde5v1pk9vtc31i9d0lcd\apache-maven-3.8.6\bin\mvn.cmd' test '-Dtest=ValidatedHttpTransportTest,RobotsPolicyServiceTest,CrawlFetcherTest' '-Dmaven.repo.local=C:\Users\moham\.m2\repository'
+```
+
+Result: expected `BUILD FAILURE` during test compilation. The wished-for `DestinationValidator`, `ValidatedHttpTransport`, effective representation identity, and structured robots-unavailable metadata did not yet exist.
+
+The later throttling-focused RED compiled after the fetch API redesign but failed because `FetchResult.Rejected` did not yet carry `retryable` and `retryAfter`. After adding the minimum metadata propagation, that focused test passed: 1 test, 0 failures/errors/skips.
+
+### Round 1 GREEN and Verification Evidence
+
+Task 3 plus the relevant Task 2 safety suite:
+
+```powershell
+& 'C:\Users\moham\.m2\wrapper\dists\apache-maven-3.8.6-bin\1ks0nkde5v1pk9vtc31i9d0lcd\apache-maven-3.8.6\bin\mvn.cmd' test '-Dtest=ValidatedHttpTransportTest,RobotsPolicyServiceTest,CrawlFetcherTest,CrawlPolicyTest,UrlCanonicalizerTest' '-Dmaven.repo.local=C:\Users\moham\.m2\repository'
+```
+
+Result: `BUILD SUCCESS`; 52 tests run, 0 failures, 0 errors, 0 skipped.
+
+Compile:
+
+```powershell
+& 'C:\Users\moham\.m2\wrapper\dists\apache-maven-3.8.6-bin\1ks0nkde5v1pk9vtc31i9d0lcd\apache-maven-3.8.6\bin\mvn.cmd' compile '-DskipTests' '-Dmaven.repo.local=C:\Users\moham\.m2\repository'
+```
+
+Result: `BUILD SUCCESS`; only the pre-existing deprecated `URL(String)` warning in legacy `ScrapeService.kt`.
+
+Full backend regression suite:
+
+```powershell
+& 'C:\Users\moham\.m2\wrapper\dists\apache-maven-3.8.6-bin\1ks0nkde5v1pk9vtc31i9d0lcd\apache-maven-3.8.6\bin\mvn.cmd' test '-Dmaven.repo.local=C:\Users\moham\.m2\repository'
+```
+
+Result: `BUILD SUCCESS`; 97 tests run, 0 failures, 0 errors, 0 skipped. The existing Surefire no-fork, PDFBox cache-directory, and MockK/ByteBuddy dynamic-agent warnings remain non-failing.
+
+### Round 1 Self-Review and Concerns
+
+- Captured-handler tests cover dead-proxy Chromium launch, validated route fulfillment, robots rejection before subresource I/O, and DOM rejection before `page.content()` allocation. Transport tests prove the validated address is used even when the hostname cannot resolve and that the original Host header is preserved.
+- Redirect-loop, robots redirect/cache, robots `429`, target `429`, cross-destination `304`, structured MIME suffix, cached-representation limit, and total-deadline behavior have focused coverage.
+- No policy or canonicalization rule from Task 2 was duplicated or weakened; the small `DestinationValidator` seam exposes the existing decision and its resolved-address snapshot to both production transport and deterministic tests.
+- The legacy `ScrapeService` wiring concern from the initial report remains deferred to the orchestration task. No additional blocking concern remains for Task 3.

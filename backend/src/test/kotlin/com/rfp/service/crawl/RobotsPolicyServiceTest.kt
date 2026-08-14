@@ -72,7 +72,7 @@ class RobotsPolicyServiceTest {
         val service = service(maxAttempts = 2)
 
         assertThat(service.canFetch(server.url("/product").toUri(), "rfp-crawler"))
-            .isEqualTo(RobotsDecision.Unavailable)
+            .isEqualTo(RobotsDecision.Unavailable(retryable = true, retryAfter = null))
         assertThat(server.requestCount).isEqualTo(2)
     }
 
@@ -91,15 +91,47 @@ class RobotsPolicyServiceTest {
         assertThat(server.requestCount).isEqualTo(2)
     }
 
+    @Test
+    fun `follows robots redirect manually and caches under requesting origin`() {
+        server.enqueue(MockResponse().setResponseCode(302).setHeader("Location", "/policy/robots.txt"))
+        server.enqueue(MockResponse().setBody("User-agent: *\nDisallow: /private/"))
+        val service = service()
+
+        assertThat(service.canFetch(server.url("/private/item").toUri(), "rfp-crawler"))
+            .isEqualTo(RobotsDecision.Disallowed)
+        assertThat(service.canFetch(server.url("/public/item").toUri(), "rfp-crawler"))
+            .isEqualTo(RobotsDecision.Allowed)
+        assertThat(server.requestCount).isEqualTo(2)
+    }
+
+    @Test
+    fun `429 remains retryable and preserves retry-after without allow-all caching`() {
+        server.enqueue(MockResponse().setResponseCode(429).setHeader("Retry-After", "7"))
+        server.enqueue(MockResponse().setResponseCode(429).setHeader("Retry-After", "7"))
+        val service = service(maxAttempts = 2)
+
+        val decision = service.canFetch(server.url("/product").toUri(), "rfp-crawler")
+
+        assertThat(decision).isEqualTo(
+            RobotsDecision.Unavailable(retryable = true, retryAfter = Duration.ofSeconds(7)),
+        )
+        assertThat(server.requestCount).isEqualTo(2)
+    }
+
     private fun service(
         maxAttempts: Int = 2,
         cacheTtl: Duration = Duration.ofHours(1),
         clock: Clock = Clock.systemUTC(),
     ) = RobotsPolicyService(
         client = OkHttpClient(),
+        destinationValidator = DestinationValidator { _, _, _ ->
+            PolicyDecision.Allowed(listOf(java.net.InetAddress.getByName(server.hostName)))
+        },
         maxAttempts = maxAttempts,
         cacheTtl = cacheTtl,
         clock = clock,
+        sleeper = RetrySleeper { },
+        jitterMillis = { 0 },
     )
 
     private fun pathDispatcher(responses: Map<String, MockResponse>) = object : Dispatcher() {

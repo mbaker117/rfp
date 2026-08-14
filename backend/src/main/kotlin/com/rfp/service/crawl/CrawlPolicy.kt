@@ -13,6 +13,10 @@ object SystemDnsResolver : DnsResolver {
     override fun resolve(host: String): List<InetAddress> = InetAddress.getAllByName(host).toList()
 }
 
+fun interface DestinationValidator {
+    fun validate(uri: URI, supplierRoot: URI, explicitHosts: Set<String>): PolicyDecision
+}
+
 enum class PolicyRejection {
     UNSUPPORTED_SCHEME,
     INVALID_HOST,
@@ -29,8 +33,8 @@ sealed interface PolicyDecision {
 
 class CrawlPolicy(
     private val dnsResolver: DnsResolver = SystemDnsResolver,
-) {
-    fun validate(
+) : DestinationValidator {
+    override fun validate(
         uri: URI,
         supplierRoot: URI,
         explicitHosts: Set<String>,

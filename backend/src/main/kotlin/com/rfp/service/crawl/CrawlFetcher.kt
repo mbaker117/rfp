@@ -1,10 +1,12 @@
 package com.rfp.service.crawl
 
 import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.Response
 import java.net.URI
 import java.security.MessageDigest
+import java.time.Duration
+import java.time.Instant
+import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
 
 enum class FetchError {
     POLICY_REJECTED,
@@ -16,14 +18,13 @@ enum class FetchError {
     UNSUPPORTED_CONTENT_TYPE,
     HTTP_FAILURE,
     NETWORK_FAILURE,
+    TIMEOUT,
 }
 
-enum class FetchMethod {
-    HTTP,
-    PLAYWRIGHT,
-}
+enum class FetchMethod { HTTP, PLAYWRIGHT }
 
 data class StoredFetchContent(
+    val effectiveUrl: URI,
     val body: ByteArray,
     val contentType: String,
     val etag: String?,
@@ -39,7 +40,9 @@ data class CrawlFetchRequest(
     val maxResponseBytes: Long = 5 * 1024 * 1024,
     val maxRedirects: Int = 5,
     val previous: StoredFetchContent? = null,
-)
+) {
+    val scope: CrawlScope get() = CrawlScope(supplierRoot, explicitHosts)
+}
 
 sealed interface FetchResult {
     data class Success(
@@ -53,101 +56,121 @@ sealed interface FetchResult {
         val contentHash: String,
     ) : FetchResult
 
-    data class Rejected(val error: FetchError) : FetchResult
+    data class Rejected(
+        val error: FetchError,
+        val retryable: Boolean = false,
+        val retryAfter: Duration? = null,
+    ) : FetchResult
 }
 
 class CrawlFetcher(
     client: OkHttpClient,
-    private val crawlPolicy: CrawlPolicy,
+    private val crawlPolicy: DestinationValidator,
     private val canonicalizer: UrlCanonicalizer,
     private val robotsPolicy: RobotsPolicyService,
+    callTimeout: Duration = Duration.ofSeconds(20),
 ) {
-    private val client = client.newBuilder()
-        .followRedirects(false)
-        .followSslRedirects(false)
-        .retryOnConnectionFailure(false)
-        .build()
+    private val transport = ValidatedHttpTransport(client, crawlPolicy, callTimeout)
 
     fun fetch(request: CrawlFetchRequest): FetchResult {
         if (request.maxResponseBytes <= 0 || request.maxRedirects < 0) {
             return FetchResult.Rejected(FetchError.HTTP_FAILURE)
         }
 
-        var current = request.url
+        var current = canonicalizer.resolveAndNormalize(request.url, request.url.toString())
+            ?: return FetchResult.Rejected(FetchError.POLICY_REJECTED)
+        val visited = mutableSetOf<URI>()
         var redirects = 0
         while (true) {
+            if (!visited.add(current)) return FetchResult.Rejected(FetchError.TOO_MANY_REDIRECTS)
             if (crawlPolicy.validate(current, request.supplierRoot, request.explicitHosts) !is PolicyDecision.Allowed) {
                 return FetchResult.Rejected(FetchError.POLICY_REJECTED)
             }
-            when (robotsPolicy.canFetch(current, request.userAgent)) {
-                RobotsDecision.Disallowed -> return FetchResult.Rejected(FetchError.ROBOTS_DISALLOWED)
-                RobotsDecision.Unavailable -> return FetchResult.Rejected(FetchError.ROBOTS_UNAVAILABLE)
+            when (val robotsDecision = robotsPolicy.canFetch(current, request.userAgent, request.scope)) {
                 RobotsDecision.Allowed -> Unit
-            }
-
-            val response = runCatching { execute(current, request) }.getOrElse {
-                return FetchResult.Rejected(FetchError.NETWORK_FAILURE)
-            }
-            if (response.isRedirect) {
-                response.use {
-                    if (redirects >= request.maxRedirects) {
-                        return FetchResult.Rejected(FetchError.TOO_MANY_REDIRECTS)
-                    }
-                    val location = it.header("Location")
-                        ?: return FetchResult.Rejected(FetchError.INVALID_REDIRECT)
-                    val destination = canonicalizer.resolveAndNormalize(current, location)
-                        ?: return FetchResult.Rejected(FetchError.INVALID_REDIRECT)
-                    if (crawlPolicy.validate(destination, request.supplierRoot, request.explicitHosts) !is PolicyDecision.Allowed) {
-                        return FetchResult.Rejected(FetchError.POLICY_REJECTED)
-                    }
-                    current = destination
-                    redirects++
-                }
-                continue
-            }
-            response.use {
-                if (it.code == 304) return reuseStored(current, it, request.previous)
-                if (it.code !in 200..299) return FetchResult.Rejected(FetchError.HTTP_FAILURE)
-
-                val contentType = normalizedContentType(it.header("Content-Type"))
-                    ?: return FetchResult.Rejected(FetchError.UNSUPPORTED_CONTENT_TYPE)
-                if (contentType !in ACCEPTED_CONTENT_TYPES && !contentType.startsWith("text/")) {
-                    return FetchResult.Rejected(FetchError.UNSUPPORTED_CONTENT_TYPE)
-                }
-
-                val responseBody = it.body ?: return FetchResult.Rejected(FetchError.HTTP_FAILURE)
-                val bytes = readBounded(responseBody.source(), responseBody.contentLength(), request.maxResponseBytes)
-                    ?: return FetchResult.Rejected(FetchError.RESPONSE_TOO_LARGE)
-                return FetchResult.Success(
-                    url = current,
-                    status = it.code,
-                    contentType = contentType,
-                    body = bytes,
-                    etag = it.header("ETag"),
-                    lastModified = it.header("Last-Modified"),
-                    method = FetchMethod.HTTP,
-                    contentHash = sha256(bytes),
+                RobotsDecision.Disallowed -> return FetchResult.Rejected(FetchError.ROBOTS_DISALLOWED)
+                is RobotsDecision.Unavailable -> return FetchResult.Rejected(
+                    FetchError.ROBOTS_UNAVAILABLE,
+                    retryable = robotsDecision.retryable,
+                    retryAfter = robotsDecision.retryAfter,
                 )
+            }
+
+            val sameStoredIdentity = request.previous?.effectiveUrl == current
+            val headers = buildMap {
+                if (sameStoredIdentity) {
+                    request.previous?.etag?.let { put("If-None-Match", it) }
+                    request.previous?.lastModified?.let { put("If-Modified-Since", it) }
+                }
+            }
+            when (val response = transport.execute(
+                TransportRequest(current, request.scope, request.userAgent, request.maxResponseBytes, headers),
+            )) {
+                is TransportResult.Failure -> return response.error.toFetchRejection()
+                is TransportResult.Success -> {
+                    if (response.status in REDIRECT_STATUSES) {
+                        if (redirects >= request.maxRedirects) {
+                            return FetchResult.Rejected(FetchError.TOO_MANY_REDIRECTS)
+                        }
+                        val location = response.header("Location")
+                            ?: return FetchResult.Rejected(FetchError.INVALID_REDIRECT)
+                        current = canonicalizer.resolveAndNormalize(current, location)
+                            ?: return FetchResult.Rejected(FetchError.INVALID_REDIRECT)
+                        redirects++
+                        continue
+                    }
+                    if (response.status == 304) {
+                        return reuseStored(current, response, request.previous, request.maxResponseBytes)
+                    }
+                    if (response.status !in 200..299) {
+                        val retryable = response.status == 408 || response.status == 429 || response.status in 500..599
+                        return FetchResult.Rejected(
+                            FetchError.HTTP_FAILURE,
+                            retryable = retryable,
+                            retryAfter = if (retryable) parseRetryAfter(response.header("Retry-After")) else null,
+                        )
+                    }
+                    val contentType = response.contentType
+                        ?: return FetchResult.Rejected(FetchError.UNSUPPORTED_CONTENT_TYPE)
+                    if (!isAcceptedCrawlContentType(contentType)) {
+                        return FetchResult.Rejected(FetchError.UNSUPPORTED_CONTENT_TYPE)
+                    }
+                    return FetchResult.Success(
+                        url = current,
+                        status = response.status,
+                        contentType = contentType,
+                        body = response.body,
+                        etag = response.header("ETag"),
+                        lastModified = response.header("Last-Modified"),
+                        method = FetchMethod.HTTP,
+                        contentHash = sha256(response.body),
+                    )
+                }
             }
         }
     }
 
-    private fun execute(uri: URI, request: CrawlFetchRequest): Response {
-        val builder = Request.Builder()
-            .url(uri.toString())
-            .header("User-Agent", request.userAgent)
-            .get()
-        request.previous?.etag?.let { builder.header("If-None-Match", it) }
-        request.previous?.lastModified?.let { builder.header("If-Modified-Since", it) }
-        return client.newCall(builder.build()).execute()
-    }
-
-    private fun reuseStored(uri: URI, response: Response, previous: StoredFetchContent?): FetchResult {
-        previous ?: return FetchResult.Rejected(FetchError.HTTP_FAILURE)
+    private fun reuseStored(
+        uri: URI,
+        response: TransportResult.Success,
+        previous: StoredFetchContent?,
+        maxResponseBytes: Long,
+    ): FetchResult {
+        if (previous == null || previous.effectiveUrl != uri) {
+            return FetchResult.Rejected(FetchError.HTTP_FAILURE)
+        }
+        if (previous.body.size.toLong() > maxResponseBytes) {
+            return FetchResult.Rejected(FetchError.RESPONSE_TOO_LARGE)
+        }
+        val contentType = response.contentType ?: normalizedContentType(previous.contentType)
+            ?: return FetchResult.Rejected(FetchError.UNSUPPORTED_CONTENT_TYPE)
+        if (!isAcceptedCrawlContentType(contentType)) {
+            return FetchResult.Rejected(FetchError.UNSUPPORTED_CONTENT_TYPE)
+        }
         return FetchResult.Success(
             url = uri,
-            status = response.code,
-            contentType = normalizedContentType(response.header("Content-Type")) ?: previous.contentType,
+            status = response.status,
+            contentType = contentType,
             body = previous.body,
             etag = response.header("ETag") ?: previous.etag,
             lastModified = response.header("Last-Modified") ?: previous.lastModified,
@@ -157,9 +180,17 @@ class CrawlFetcher(
     }
 
     companion object {
-        private val ACCEPTED_CONTENT_TYPES = setOf(
+        private val REDIRECT_STATUSES = setOf(300, 301, 302, 303, 307, 308)
+    }
+}
+
+internal fun isAcceptedCrawlContentType(contentType: String): Boolean {
+    val type = normalizedContentType(contentType) ?: return false
+    return type.startsWith("text/") ||
+        type.endsWith("+json") ||
+        type.endsWith("+xml") ||
+        type in setOf(
             "application/json",
-            "application/ld+json",
             "application/xml",
             "application/xhtml+xml",
             "application/pdf",
@@ -168,15 +199,26 @@ class CrawlFetcher(
             "application/vnd.ms-excel",
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
-    }
 }
 
-internal fun normalizedContentType(header: String?): String? = header
-    ?.substringBefore(';')
-    ?.trim()
-    ?.lowercase()
-    ?.takeIf { it.isNotEmpty() }
-
 internal fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256")
-    .digest(bytes)
-    .joinToString("") { "%02x".format(it) }
+    .digest(bytes).joinToString("") { "%02x".format(it) }
+
+internal fun TransportResult.Success.header(name: String): String? =
+    headers.entries.firstOrNull { it.key.equals(name, ignoreCase = true) }?.value
+
+private fun TransportError.toFetchRejection(): FetchResult.Rejected = when (this) {
+    TransportError.POLICY_REJECTED -> FetchResult.Rejected(FetchError.POLICY_REJECTED)
+    TransportError.RESPONSE_TOO_LARGE -> FetchResult.Rejected(FetchError.RESPONSE_TOO_LARGE)
+    TransportError.TIMEOUT -> FetchResult.Rejected(FetchError.TIMEOUT, retryable = true)
+    TransportError.NETWORK_FAILURE -> FetchResult.Rejected(FetchError.NETWORK_FAILURE, retryable = true)
+}
+
+internal fun parseRetryAfter(value: String?, now: Instant = Instant.now()): Duration? {
+    value ?: return null
+    value.trim().toLongOrNull()?.let { return Duration.ofSeconds(it.coerceAtLeast(0)) }
+    return runCatching {
+        val retryAt = ZonedDateTime.parse(value, DateTimeFormatter.RFC_1123_DATE_TIME).toInstant()
+        Duration.between(now, retryAt).let { if (it.isNegative) Duration.ZERO else it }
+    }.getOrNull()
+}

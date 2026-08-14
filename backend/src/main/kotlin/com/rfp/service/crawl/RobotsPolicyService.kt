@@ -3,123 +3,182 @@ package com.rfp.service.crawl
 import crawlercommons.robots.SimpleRobotRules
 import crawlercommons.robots.SimpleRobotRulesParser
 import okhttp3.OkHttpClient
-import okhttp3.Request
+import okio.BufferedSource
 import java.io.ByteArrayOutputStream
 import java.net.URI
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
+import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 
-enum class RobotsDecision {
-    Allowed,
-    Disallowed,
-    Unavailable,
+sealed interface RobotsDecision {
+    data object Allowed : RobotsDecision
+    data object Disallowed : RobotsDecision
+    data class Unavailable(
+        val retryable: Boolean,
+        val retryAfter: Duration?,
+    ) : RobotsDecision
+}
+
+fun interface RetrySleeper {
+    fun sleep(duration: Duration)
 }
 
 class RobotsPolicyService(
     client: OkHttpClient,
+    destinationValidator: DestinationValidator = CrawlPolicy(),
+    private val canonicalizer: UrlCanonicalizer = UrlCanonicalizer(),
     private val cacheTtl: Duration = Duration.ofHours(1),
+    private val negativeCacheTtl: Duration = Duration.ofSeconds(15),
     private val maxAttempts: Int = 2,
+    private val maxRedirects: Int = 3,
     private val maxRobotsBytes: Long = 512 * 1024,
+    private val baseBackoff: Duration = Duration.ofMillis(100),
+    private val maxBackoff: Duration = Duration.ofSeconds(2),
     private val clock: Clock = Clock.systemUTC(),
+    private val sleeper: RetrySleeper = RetrySleeper { Thread.sleep(it.toMillis()) },
+    private val jitterMillis: (Long) -> Long = { bound -> if (bound <= 0) 0 else kotlin.random.Random.nextLong(bound + 1) },
 ) {
-    private val client = client.newBuilder()
-        .followRedirects(false)
-        .followSslRedirects(false)
-        .retryOnConnectionFailure(false)
-        .build()
-    private val cache = ConcurrentHashMap<URI, CachedRules>()
+    private val transport = ValidatedHttpTransport(client, destinationValidator)
+    private val cache = ConcurrentHashMap<CacheKey, CachedValue>()
+    private val originLocks = ConcurrentHashMap<CacheKey, Any>()
 
     init {
         require(!cacheTtl.isNegative && !cacheTtl.isZero) { "cacheTtl must be positive" }
+        require(!negativeCacheTtl.isNegative && !negativeCacheTtl.isZero) { "negativeCacheTtl must be positive" }
         require(maxAttempts > 0) { "maxAttempts must be positive" }
+        require(maxRedirects >= 0) { "maxRedirects must not be negative" }
         require(maxRobotsBytes > 0) { "maxRobotsBytes must be positive" }
     }
 
     fun canFetch(uri: URI, userAgent: String): RobotsDecision {
-        val origin = originOf(uri) ?: return RobotsDecision.Unavailable
+        val origin = originOf(uri) ?: return unavailable(retryable = false)
+        return canFetch(uri, userAgent, CrawlScope(origin, emptySet()))
+    }
+
+    fun canFetch(uri: URI, userAgent: String, scope: CrawlScope): RobotsDecision {
+        val requestingOrigin = originOf(uri) ?: return unavailable(retryable = false)
+        val key = CacheKey(
+            requestingOrigin = requestingOrigin,
+            supplierRoot = scope.supplierRoot,
+            explicitHosts = scope.explicitHosts.map { it.lowercase(Locale.ROOT) }.sorted(),
+        )
         val now = clock.instant()
-        val cached = cache[origin]
-        val policy = if (cached != null && now.isBefore(cached.expiresAt)) {
-            cached.policy
-        } else {
-            synchronized(cache) {
-                val refreshed = cache[origin]
-                if (refreshed != null && now.isBefore(refreshed.expiresAt)) {
-                    refreshed.policy
-                } else {
-                    retrieveRules(origin, userAgent)?.also {
-                        cache[origin] = CachedRules(it, now.plus(cacheTtl))
+        cache[key]?.takeIf { now.isBefore(it.expiresAt) }?.let { return it.value.decisionFor(uri, userAgent) }
+
+        val lock = originLocks.computeIfAbsent(key) { Any() }
+        return synchronized(lock) {
+            val refreshedNow = clock.instant()
+            cache[key]?.takeIf { refreshedNow.isBefore(it.expiresAt) }
+                ?.let { return@synchronized it.value.decisionFor(uri, userAgent) }
+
+            val value = retrievePolicy(requestingOrigin, scope, userAgent)
+            val ttl = if (value is CachedPolicy) cacheTtl else negativeCacheTtl
+            cache[key] = CachedValue(value, clock.instant().plus(ttl))
+            value.decisionFor(uri, userAgent)
+        }
+    }
+
+    private fun retrievePolicy(origin: URI, scope: CrawlScope, userAgent: String): CacheableRobotsValue {
+        var preservedRetryAfter: Duration? = null
+        repeat(maxAttempts) { attempt ->
+            when (val result = retrieveAttempt(origin.resolve("/robots.txt"), scope, userAgent)) {
+                is RetrievalResult.Policy -> return CachedPolicy(result.policy)
+                is RetrievalResult.TerminalFailure -> return CachedFailure(unavailable(false, result.retryAfter))
+                is RetrievalResult.RetryableFailure -> {
+                    preservedRetryAfter = maxDuration(preservedRetryAfter, result.retryAfter)
+                    if (attempt + 1 < maxAttempts) {
+                        sleeper.sleep(backoffFor(attempt, result.retryAfter))
                     }
                 }
-            } ?: return RobotsDecision.Unavailable
+            }
         }
-        val rules = policy.rulesFor(productToken(userAgent))
-
-        return if (rules.isAllowed(uri.toString())) RobotsDecision.Allowed else RobotsDecision.Disallowed
+        return CachedFailure(unavailable(true, preservedRetryAfter))
     }
 
-    private fun retrieveRules(origin: URI, userAgent: String): CachedPolicy? {
-        val robotsUri = origin.resolve("/robots.txt")
-        repeat(maxAttempts) {
-            val policy = runCatching {
-                client.newCall(
-                    Request.Builder()
-                        .url(robotsUri.toString())
-                        .header("User-Agent", userAgent)
-                        .get()
-                        .build(),
-                ).execute().use { response ->
-                    when {
-                        response.code in 200..299 -> {
-                            val body = response.body ?: return@use null
-                            val bytes = readBounded(body.source(), body.contentLength(), maxRobotsBytes)
-                                ?: return@use null
-                            RobotsDocument(
-                                uri = robotsUri,
-                                bytes = bytes,
-                                contentType = response.header("Content-Type") ?: "text/plain",
-                            )
-                        }
-
-                        response.code in 400..499 -> FailedFetchPolicy(response.code)
-                        else -> null
-                    }
+    private fun retrieveAttempt(initialUri: URI, scope: CrawlScope, userAgent: String): RetrievalResult {
+        var current = initialUri
+        val visited = mutableSetOf<URI>()
+        for (redirectCount in 0..maxRedirects) {
+            if (!visited.add(current)) return RetrievalResult.TerminalFailure(null)
+            when (val response = transport.execute(
+                TransportRequest(current, scope, userAgent, maxRobotsBytes),
+            )) {
+                is TransportResult.Failure -> return when (response.error) {
+                    TransportError.POLICY_REJECTED -> RetrievalResult.TerminalFailure(null)
+                    TransportError.RESPONSE_TOO_LARGE -> RetrievalResult.TerminalFailure(null)
+                    TransportError.TIMEOUT, TransportError.NETWORK_FAILURE -> RetrievalResult.RetryableFailure(null)
                 }
-            }.getOrNull()
-            if (policy != null) return policy
+
+                is TransportResult.Success -> {
+                    if (response.status in REDIRECT_STATUSES) {
+                        if (redirectCount >= maxRedirects) return RetrievalResult.TerminalFailure(null)
+                        val location = response.header("Location")
+                            ?: return RetrievalResult.TerminalFailure(null)
+                        current = canonicalizer.resolveAndNormalize(current, location)
+                            ?: return RetrievalResult.TerminalFailure(null)
+                        continue
+                    }
+                    if (response.status in 200..299) {
+                        return RetrievalResult.Policy(
+                            RobotsDocument(current, response.body, response.contentType ?: "text/plain"),
+                        )
+                    }
+                    val retryAfter = parseRetryAfter(response.header("Retry-After"))
+                    if (response.status == 408 || response.status == 429 || response.status in 500..599) {
+                        return RetrievalResult.RetryableFailure(retryAfter)
+                    }
+                    if (response.status in 400..499) {
+                        return RetrievalResult.Policy(FailedFetchPolicy(response.status))
+                    }
+                    return RetrievalResult.TerminalFailure(retryAfter)
+                }
+            }
         }
-        return null
+        return RetrievalResult.TerminalFailure(null)
     }
 
-    private fun originOf(uri: URI): URI? {
-        val scheme = uri.scheme?.lowercase(Locale.ROOT)?.takeIf { it == "http" || it == "https" } ?: return null
-        val host = normalizeAsciiHost(uri.host) ?: return null
-        val port = when {
-            uri.port == -1 -> -1
-            scheme == "http" && uri.port == 80 -> -1
-            scheme == "https" && uri.port == 443 -> -1
-            uri.port in 1..65535 -> uri.port
-            else -> return null
-        }
-        return URI(scheme, null, host, port, null, null, null)
+    private fun backoffFor(attempt: Int, retryAfter: Duration?): Duration {
+        if (retryAfter != null) return minDuration(retryAfter, maxBackoff)
+        val multiplier = 1L shl attempt.coerceAtMost(20)
+        val baseMillis = (baseBackoff.toMillis() * multiplier).coerceAtMost(maxBackoff.toMillis())
+        val jitter = jitterMillis((baseMillis / 2).coerceAtLeast(0))
+        return Duration.ofMillis((baseMillis + jitter).coerceAtMost(maxBackoff.toMillis()))
     }
 
-    private fun productToken(userAgent: String): String = userAgent
-        .trim()
-        .substringBefore('/')
-        .substringBefore(' ')
-        .lowercase(Locale.ROOT)
-        .ifBlank { "rfp-crawler" }
+    private fun parseRetryAfter(value: String?): Duration? {
+        value ?: return null
+        value.trim().toLongOrNull()?.let { return Duration.ofSeconds(it.coerceAtLeast(0)) }
+        return runCatching {
+            val retryAt = ZonedDateTime.parse(value, DateTimeFormatter.RFC_1123_DATE_TIME).toInstant()
+            Duration.between(clock.instant(), retryAt).coerceAtLeast(Duration.ZERO)
+        }.getOrNull()
+    }
 
-    private data class CachedRules(
-        val policy: CachedPolicy,
-        val expiresAt: Instant,
-    )
+    private sealed interface CacheableRobotsValue {
+        fun decisionFor(uri: URI, userAgent: String): RobotsDecision
+    }
 
-    private sealed interface CachedPolicy {
+    private data class CachedPolicy(val policy: RobotsRulesSource) : CacheableRobotsValue {
+        override fun decisionFor(uri: URI, userAgent: String): RobotsDecision {
+            val token = userAgent.trim().substringBefore('/').substringBefore(' ').lowercase(Locale.ROOT)
+                .ifBlank { "rfp-crawler" }
+            return if (policy.rulesFor(token).isAllowed(uri.toString())) {
+                RobotsDecision.Allowed
+            } else {
+                RobotsDecision.Disallowed
+            }
+        }
+    }
+
+    private data class CachedFailure(val decision: RobotsDecision.Unavailable) : CacheableRobotsValue {
+        override fun decisionFor(uri: URI, userAgent: String): RobotsDecision = decision
+    }
+
+    private sealed interface RobotsRulesSource {
         fun rulesFor(productToken: String): SimpleRobotRules
     }
 
@@ -127,27 +186,48 @@ class RobotsPolicyService(
         val uri: URI,
         val bytes: ByteArray,
         val contentType: String,
-    ) : CachedPolicy {
+    ) : RobotsRulesSource {
         override fun rulesFor(productToken: String): SimpleRobotRules = SimpleRobotRulesParser().parseContent(
-            uri.toString(),
-            bytes,
-            contentType,
-            listOf(productToken),
+            uri.toString(), bytes, contentType, listOf(productToken),
         )
     }
 
-    private data class FailedFetchPolicy(val status: Int) : CachedPolicy {
+    private data class FailedFetchPolicy(val status: Int) : RobotsRulesSource {
         override fun rulesFor(productToken: String): SimpleRobotRules = SimpleRobotRulesParser().failedFetch(status)
+    }
+
+    private sealed interface RetrievalResult {
+        data class Policy(val policy: RobotsRulesSource) : RetrievalResult
+        data class RetryableFailure(val retryAfter: Duration?) : RetrievalResult
+        data class TerminalFailure(val retryAfter: Duration?) : RetrievalResult
+    }
+
+    private data class CacheKey(
+        val requestingOrigin: URI,
+        val supplierRoot: URI,
+        val explicitHosts: List<String>,
+    )
+
+    private data class CachedValue(val value: CacheableRobotsValue, val expiresAt: Instant)
+
+    companion object {
+        private val REDIRECT_STATUSES = setOf(300, 301, 302, 303, 307, 308)
+
+        private fun unavailable(retryable: Boolean, retryAfter: Duration? = null) =
+            RobotsDecision.Unavailable(retryable, retryAfter)
+
+        private fun minDuration(first: Duration, second: Duration): Duration = if (first <= second) first else second
+        private fun maxDuration(first: Duration?, second: Duration?): Duration? = when {
+            first == null -> second
+            second == null -> first
+            first >= second -> first
+            else -> second
+        }
     }
 }
 
-internal fun readBounded(
-    source: okio.BufferedSource,
-    declaredLength: Long,
-    maxBytes: Long,
-): ByteArray? {
+internal fun readBounded(source: BufferedSource, declaredLength: Long, maxBytes: Long): ByteArray? {
     if (declaredLength > maxBytes) return null
-
     val output = ByteArrayOutputStream(minOf(maxBytes, 8192L).toInt())
     val chunk = ByteArray(8192)
     var total = 0L
@@ -161,3 +241,5 @@ internal fun readBounded(
     }
     return output.toByteArray()
 }
+
+private fun Duration.coerceAtLeast(minimum: Duration): Duration = if (this < minimum) minimum else this

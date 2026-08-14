@@ -8,10 +8,9 @@ import java.time.LocalDate
 data class ProductPrice(
     @Id
     val productId: Long,
-    @MapsId
     @OneToOne(fetch = FetchType.LAZY)
-    @JoinColumn(name = "product_id")
-    val product: Product,
+    @JoinColumn(name = "product_id", insertable = false, updatable = false)
+    val product: Product? = null,
     val price: BigDecimal? = null,
     val currency: String = "JOD",
     val asOf: LocalDate? = null,

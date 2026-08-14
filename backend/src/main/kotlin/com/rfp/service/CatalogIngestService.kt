@@ -45,9 +45,11 @@ open class CatalogIngestService(
         val supplier = supplierRepo.findById(supplierId).orElseThrow()
         val ingest = ingestRepo.save(CatalogIngest(supplier = supplier, kind = "scrape", status = "RUNNING", startedAt = Instant.now()))
         try {
-            val html = scrapeService.crawlWebsite(supplier.officialWebsite
+            val crawl = scrapeService.crawlWebsite(supplier.officialWebsite
                 ?: throw IllegalStateException("No website for supplier ${supplier.name}"))
-            runIngest(ingest, html, "scrape")
+            // Save partial step log before extraction so it's visible even if extraction fails
+            ingestRepo.save(ingest.copy(stepLog = crawl.stepLog))
+            runIngest(ingest.copy(stepLog = crawl.stepLog), crawl.content, "scrape")
         } catch (e: Exception) {
             ingestRepo.save(ingest.copy(status = "FAILED", errorMsg = e.message, finishedAt = Instant.now()))
             supplierRepo.save(supplier.copy(scrapeStatus = "FAILED"))
@@ -65,6 +67,10 @@ open class CatalogIngestService(
         }
 
         val parsed = llmService.parseCatalogBatch(rawText, knownClasses)
+        // Append extraction result to step log if present
+        val extractionNote = "LLM parsed: ${parsed.size} product(s)"
+        val updatedLog = (ingest.stepLog?.trimEnd()?.let { "$it\n$extractionNote" }) ?: extractionNote
+        ingestRepo.save(ingest.copy(stepLog = updatedLog))
         val seenIds = mutableSetOf<Long>()
 
         parsed.forEach { p ->
@@ -95,16 +101,19 @@ open class CatalogIngestService(
                 saved
             }
 
-            // Handle price separately — never in LLM context
+            // Handle price separately — never in LLM context; isolated try so one bad price
+            // doesn't abort the whole ingest
             if (p.price != null) {
-                val existingPrice = productPriceRepo.findById(product.id).orElse(null)
-                if (existingPrice != null && existingPrice.price != null &&
-                    existingPrice.price.compareTo(p.price) != 0) {
-                    priceHistoryRepo.save(ProductPriceHistory(product = product,
-                        price = existingPrice.price, currency = existingPrice.currency))
-                }
-                productPriceRepo.save(ProductPrice(productId = product.id, product = product,
-                    price = p.price, currency = p.currency))
+                try {
+                    val existingPrice = productPriceRepo.findById(product.id).orElse(null)
+                    if (existingPrice != null && existingPrice.price != null &&
+                        existingPrice.price.compareTo(p.price) != 0) {
+                        priceHistoryRepo.save(ProductPriceHistory(product = product,
+                            price = existingPrice.price, currency = existingPrice.currency))
+                    }
+                    productPriceRepo.save(ProductPrice(productId = product.id,
+                        price = p.price, currency = p.currency))
+                } catch (_: Exception) { /* price save failed; product already saved, continue */ }
             }
         }
 
@@ -113,7 +122,7 @@ open class CatalogIngestService(
             .filter { it.id !in seenIds && !it.isStale }
             .forEach { productRepo.save(it.copy(isStale = true)) }
 
-        ingestRepo.save(ingest.copy(status = "DONE", itemsFound = seenIds.size, finishedAt = Instant.now()))
+        ingestRepo.save(ingest.copy(status = "DONE", itemsFound = seenIds.size, finishedAt = Instant.now(), stepLog = updatedLog))
         // Mark the supplier as freshly scraped so CatalogRefreshJob picks up the right cutoff
         supplierRepo.save(ingest.supplier.copy(scrapeStatus = "DONE", lastScrapedAt = Instant.now()))
     }

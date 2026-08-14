@@ -1,8 +1,9 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { Fragment, useEffect, useState } from 'react';
 import { api } from '@/src/lib/api';
 import type { AdminProduct, Supplier } from '@/src/lib/types';
 import { useAuth } from '@/src/hooks/useAuth';
+import { ProductAttributePanel } from '@/src/components/ProductAttributePanel';
 
 export default function AdminProductsPage() {
   const { token } = useAuth();
@@ -12,6 +13,7 @@ export default function AdminProductsPage() {
   const [q, setQ] = useState('');
   const [supplierId, setSupplierId] = useState<number | ''>('');
   const [page, setPage] = useState(0);
+  const [expandedId, setExpandedId] = useState<number | null>(null);
   const [error, setError] = useState('');
   const SIZE = 50;
 
@@ -76,24 +78,36 @@ export default function AdminProductsPage() {
           </thead>
           <tbody className="divide-y divide-slate-100">
             {products.map(p => (
-              <tr key={p.id} className="hover:bg-slate-50">
-                <td className="px-4 py-3 text-slate-900">{p.name}</td>
-                <td className="px-4 py-3 text-slate-500 font-mono text-xs">{p.mpn ?? '—'}</td>
-                <td className="px-4 py-3 text-slate-600">{p.supplierName}</td>
-                <td className="px-4 py-3 text-slate-500">{p.productClass ?? '—'}</td>
-                <td className="px-4 py-3">
-                  {p.source && (
-                    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${
-                      p.source === 'scrape' ? 'bg-blue-100 text-blue-700' : 'bg-violet-100 text-violet-700'
-                    }`}>{p.source === 'scrape' ? 'web' : 'upload'}</span>
-                  )}
-                </td>
-                <td className="px-4 py-3">
-                  {p.isStale && (
-                    <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-700">stale</span>
-                  )}
-                </td>
-              </tr>
+              <Fragment key={p.id}>
+                <tr
+                  onClick={() => setExpandedId(expandedId === p.id ? null : p.id)}
+                  className="hover:bg-slate-50 cursor-pointer"
+                >
+                  <td className="px-4 py-3 text-slate-900">{p.name}</td>
+                  <td className="px-4 py-3 text-slate-500 font-mono text-xs">{p.mpn ?? '—'}</td>
+                  <td className="px-4 py-3 text-slate-600">{p.supplierName}</td>
+                  <td className="px-4 py-3 text-slate-500">{p.productClass ?? '—'}</td>
+                  <td className="px-4 py-3">
+                    {p.source && (
+                      <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${
+                        p.source === 'scrape' ? 'bg-blue-100 text-blue-700' : 'bg-violet-100 text-violet-700'
+                      }`}>{p.source === 'scrape' ? 'web' : 'upload'}</span>
+                    )}
+                  </td>
+                  <td className="px-4 py-3">
+                    {p.isStale && (
+                      <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-700">stale</span>
+                    )}
+                  </td>
+                </tr>
+                {expandedId === p.id && p.attributes && (
+                  <tr className="bg-slate-50">
+                    <td colSpan={6} className="px-6 py-4">
+                      <ProductAttributePanel attributesJson={p.attributes} />
+                    </td>
+                  </tr>
+                )}
+              </Fragment>
             ))}
           </tbody>
         </table>

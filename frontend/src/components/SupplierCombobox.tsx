@@ -9,6 +9,8 @@ export interface SelectedSupplier {
   catalogFile: File | null;
 }
 
+type SupplierState = 'checking' | 'ok' | 'empty' | 'scraping' | 'scraped';
+
 interface Props {
   token: string;
   onChange: (selected: SelectedSupplier[]) => void;
@@ -17,6 +19,7 @@ interface Props {
 export function SupplierCombobox({ token, onChange }: Props) {
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [selected, setSelected] = useState<SelectedSupplier[]>([]);
+  const [supplierStates, setSupplierStates] = useState<Record<number, SupplierState>>({});
   const [query, setQuery] = useState('');
   const [open, setOpen] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -50,6 +53,28 @@ export function SupplierCombobox({ token, onChange }: Props) {
 
   const selectExisting = (s: Supplier) => {
     addSupplier({ id: s.id, name: s.name, catalogFile: null });
+    // Async product count check
+    setSupplierStates(prev => ({ ...prev, [s.id]: 'checking' }));
+    api.admin.listProducts(token, { supplierId: s.id, size: 1 })
+      .then(result => {
+        setSupplierStates(prev => ({
+          ...prev,
+          [s.id]: result.totalElements === 0 ? 'empty' : 'ok',
+        }));
+      })
+      .catch(() => {
+        setSupplierStates(prev => ({ ...prev, [s.id]: 'ok' }));
+      });
+  };
+
+  const triggerScrape = async (supplierId: number) => {
+    setSupplierStates(prev => ({ ...prev, [supplierId]: 'scraping' }));
+    try {
+      await api.triggerScrape(supplierId, token);
+      setSupplierStates(prev => ({ ...prev, [supplierId]: 'scraped' }));
+    } catch {
+      setSupplierStates(prev => ({ ...prev, [supplierId]: 'empty' }));
+    }
   };
 
   const createNew = async () => {
@@ -71,6 +96,11 @@ export function SupplierCombobox({ token, onChange }: Props) {
     const next = selected.filter(s => s.id !== id);
     setSelected(next);
     onChange(next);
+    setSupplierStates(prev => {
+      const copy = { ...prev };
+      delete copy[id];
+      return copy;
+    });
   };
 
   const setCatalog = (id: number, file: File | null) => {
@@ -88,35 +118,59 @@ export function SupplierCombobox({ token, onChange }: Props) {
       {/* Selected chips */}
       {selected.length > 0 && (
         <div className="flex flex-wrap gap-2">
-          {selected.map(s => (
-            <div key={s.id} className="flex items-center gap-1 bg-indigo-50 border border-indigo-200 rounded-full px-3 py-1 text-sm">
-              <span className="font-medium text-indigo-800">{s.name}</span>
-              <label className="cursor-pointer text-indigo-500 hover:text-indigo-700 text-xs ml-1">
-                {s.catalogFile ? (
-                  <span title={s.catalogFile.name}>📎</span>
-                ) : (
-                  <span>+ Catalog</span>
+          {selected.map(s => {
+            const state = supplierStates[s.id];
+            return (
+              <div key={s.id} className="space-y-1">
+                <div className="flex items-center gap-1 bg-indigo-50 border border-indigo-200 rounded-full px-3 py-1 text-sm">
+                  <span className="font-medium text-indigo-800">{s.name}</span>
+                  <label className="cursor-pointer text-indigo-500 hover:text-indigo-700 text-xs ml-1">
+                    {s.catalogFile ? (
+                      <span title={s.catalogFile.name}>📎</span>
+                    ) : (
+                      <span>+ Catalog</span>
+                    )}
+                    <input
+                      type="file"
+                      accept=".pdf,.doc,.docx,.xls,.xlsx"
+                      className="hidden"
+                      onChange={e => setCatalog(s.id, e.target.files?.[0] ?? null)}
+                    />
+                  </label>
+                  {s.catalogFile && (
+                    <button
+                      onClick={() => setCatalog(s.id, null)}
+                      className="text-indigo-400 hover:text-indigo-600 text-xs"
+                      title="Remove catalog"
+                    >✕</button>
+                  )}
+                  <button
+                    onClick={() => remove(s.id)}
+                    className="text-indigo-400 hover:text-red-500 ml-1 text-xs"
+                  >✕</button>
+                </div>
+
+                {/* Empty supplier warning */}
+                {state === 'empty' && (
+                  <div className="flex items-center gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-xs">
+                    <span className="text-amber-700">No products found for this supplier.</span>
+                    <button
+                      onClick={() => triggerScrape(s.id)}
+                      className="text-xs bg-amber-600 text-white px-2 py-0.5 rounded hover:bg-amber-700 transition-colors"
+                    >
+                      Trigger Scrape
+                    </button>
+                  </div>
                 )}
-                <input
-                  type="file"
-                  accept=".pdf,.doc,.docx,.xls,.xlsx"
-                  className="hidden"
-                  onChange={e => setCatalog(s.id, e.target.files?.[0] ?? null)}
-                />
-              </label>
-              {s.catalogFile && (
-                <button
-                  onClick={() => setCatalog(s.id, null)}
-                  className="text-indigo-400 hover:text-indigo-600 text-xs"
-                  title="Remove catalog"
-                >✕</button>
-              )}
-              <button
-                onClick={() => remove(s.id)}
-                className="text-indigo-400 hover:text-red-500 ml-1 text-xs"
-              >✕</button>
-            </div>
-          ))}
+                {state === 'scraping' && (
+                  <p className="text-xs text-amber-600 px-1">Scraping in progress… check admin portal for status.</p>
+                )}
+                {state === 'scraped' && (
+                  <p className="text-xs text-emerald-600 px-1">Scrape started — products will appear once complete.</p>
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
 

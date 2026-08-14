@@ -18,6 +18,7 @@ class SupplierControllerTest {
     @Test
     fun `register saves and returns supplier`() {
         val req = SupplierRequest(name = "Acme", officialWebsite = "https://acme.com")
+        every { repo.findByNameIgnoreCase("Acme") } returns null
         every { repo.save(any()) } answers { firstArg<Supplier>().copy(id = 1L) }
         val resp = controller.register(req)
         assertThat(resp.statusCode.value()).isEqualTo(200)

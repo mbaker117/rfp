@@ -16,5 +16,6 @@ data class CatalogIngest(
     val errorMsg: String? = null,
     val itemsFound: Int? = null,
     val startedAt: Instant? = null,
-    val finishedAt: Instant? = null
+    val finishedAt: Instant? = null,
+    val stepLog: String? = null
 )

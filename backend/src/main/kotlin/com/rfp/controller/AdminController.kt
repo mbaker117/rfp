@@ -14,7 +14,7 @@ data class ProductDto(
     val id: Long, val name: String, val mpn: String?,
     val supplierId: Long,
     val supplierName: String, val productClass: String?, val isStale: Boolean,
-    val source: String?
+    val source: String?, val attributes: String?
 )
 data class TenderDto(
     val id: Long, val filename: String, val userId: Long,
@@ -73,7 +73,8 @@ class AdminController(
                     supplierName = p.supplier.name,
                     productClass = p.productClass?.name,
                     isStale = p.isStale,
-                    source = p.source
+                    source = p.source,
+                    attributes = p.attributes.takeIf { it != "{}" }
                 )
             },
             totalElements = result.totalElements

@@ -1,4 +1,5 @@
 .superpowers/
+.worktrees/
 
 # Backend build artifacts
 backend/build/

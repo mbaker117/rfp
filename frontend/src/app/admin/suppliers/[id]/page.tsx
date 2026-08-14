@@ -1,9 +1,10 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { Fragment, useEffect, useState } from 'react';
 import { useParams } from 'next/navigation';
 import { api } from '@/src/lib/api';
 import type { AdminProduct, IngestRecord, Supplier } from '@/src/lib/types';
 import { useAuth } from '@/src/hooks/useAuth';
+import { ProductAttributePanel } from '@/src/components/ProductAttributePanel';
 
 const BASE = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080';
 
@@ -17,6 +18,8 @@ export default function SupplierDetailPage() {
   const [error, setError] = useState('');
   const [scrapeMsg, setScrapeMsg] = useState('');
   const [websiteInput, setWebsiteInput] = useState('');
+  const [expandedIngestId, setExpandedIngestId] = useState<number | null>(null);
+  const [expandedProductId, setExpandedProductId] = useState<number | null>(null);
 
   useEffect(() => {
     if (!token) return;
@@ -146,25 +149,37 @@ export default function SupplierDetailPage() {
             </thead>
             <tbody className="divide-y divide-slate-100">
               {products.map(p => (
-                <tr key={p.id} className="hover:bg-slate-50">
-                  <td className="px-4 py-3 text-slate-900">{p.name}</td>
-                  <td className="px-4 py-3 text-slate-500 font-mono text-xs">{p.mpn ?? '—'}</td>
-                  <td className="px-4 py-3 text-slate-500">{p.productClass ?? '—'}</td>
-                  <td className="px-4 py-3">
-                    {p.source && (
-                      <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${
-                        p.source === 'scrape' ? 'bg-blue-100 text-blue-700' : 'bg-violet-100 text-violet-700'
-                      }`}>{p.source === 'scrape' ? 'web' : 'upload'}</span>
-                    )}
-                  </td>
-                  <td className="px-4 py-3">
-                    {p.isStale && (
-                      <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-700">
-                        stale
-                      </span>
-                    )}
-                  </td>
-                </tr>
+                <Fragment key={p.id}>
+                  <tr
+                    onClick={() => setExpandedProductId(expandedProductId === p.id ? null : p.id)}
+                    className="hover:bg-slate-50 cursor-pointer"
+                  >
+                    <td className="px-4 py-3 text-slate-900">{p.name}</td>
+                    <td className="px-4 py-3 text-slate-500 font-mono text-xs">{p.mpn ?? '—'}</td>
+                    <td className="px-4 py-3 text-slate-500">{p.productClass ?? '—'}</td>
+                    <td className="px-4 py-3">
+                      {p.source && (
+                        <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${
+                          p.source === 'scrape' ? 'bg-blue-100 text-blue-700' : 'bg-violet-100 text-violet-700'
+                        }`}>{p.source === 'scrape' ? 'web' : 'upload'}</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3">
+                      {p.isStale && (
+                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-700">
+                          stale
+                        </span>
+                      )}
+                    </td>
+                  </tr>
+                  {expandedProductId === p.id && p.attributes && (
+                    <tr className="bg-slate-50">
+                      <td colSpan={5} className="px-6 py-4">
+                        <ProductAttributePanel attributesJson={p.attributes} />
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
               ))}
             </tbody>
           </table>
@@ -186,27 +201,46 @@ export default function SupplierDetailPage() {
             </thead>
             <tbody className="divide-y divide-slate-100">
               {ingests.map(i => (
-                <tr key={i.id} className={`hover:bg-slate-50 ${i.status === 'FAILED' ? 'bg-red-50' : ''}`}>
-                  <td className="px-4 py-3 text-slate-700 font-mono text-xs">{i.kind}</td>
-                  <td className="px-4 py-3">
-                    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${
-                      i.status === 'DONE' ? 'bg-emerald-100 text-emerald-700' :
-                      i.status === 'FAILED' ? 'bg-red-100 text-red-700' :
-                      i.status === 'RUNNING' ? 'bg-amber-100 text-amber-700' :
-                      'bg-slate-100 text-slate-500'
-                    }`}>{i.status}</span>
-                  </td>
-                  <td className="px-4 py-3 text-slate-500 text-xs">{i.startedAt ? new Date(i.startedAt).toLocaleString() : '—'}</td>
-                  <td className="px-4 py-3 text-slate-500 text-xs">{i.finishedAt ? new Date(i.finishedAt).toLocaleString() : '—'}</td>
-                  <td className="px-4 py-3 text-slate-700 text-sm font-medium">
-                    {i.itemsFound !== null ? (
-                      <span className={i.itemsFound === 0 ? 'text-amber-600' : 'text-emerald-600'}>
-                        {i.itemsFound}
-                      </span>
-                    ) : '—'}
-                  </td>
-                  <td className="px-4 py-3 text-red-600 text-xs max-w-xs truncate" title={i.errorMsg ?? undefined}>{i.errorMsg ?? '—'}</td>
-                </tr>
+                <Fragment key={i.id}>
+                  <tr
+                    onClick={() => setExpandedIngestId(expandedIngestId === i.id ? null : i.id)}
+                    className={`cursor-pointer hover:bg-slate-50 ${i.status === 'FAILED' ? 'bg-red-50 hover:bg-red-100' : ''}`}
+                  >
+                    <td className="px-4 py-3 text-slate-700 font-mono text-xs">{i.kind}</td>
+                    <td className="px-4 py-3">
+                      <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${
+                        i.status === 'DONE' ? 'bg-emerald-100 text-emerald-700' :
+                        i.status === 'FAILED' ? 'bg-red-100 text-red-700' :
+                        i.status === 'RUNNING' ? 'bg-amber-100 text-amber-700' :
+                        'bg-slate-100 text-slate-500'
+                      }`}>{i.status}</span>
+                    </td>
+                    <td className="px-4 py-3 text-slate-500 text-xs">{i.startedAt ? new Date(i.startedAt).toLocaleString() : '—'}</td>
+                    <td className="px-4 py-3 text-slate-500 text-xs">{i.finishedAt ? new Date(i.finishedAt).toLocaleString() : '—'}</td>
+                    <td className="px-4 py-3 text-slate-700 text-sm font-medium">
+                      {i.itemsFound !== null ? (
+                        <span className={i.itemsFound === 0 ? 'text-amber-600' : 'text-emerald-600'}>
+                          {i.itemsFound}
+                        </span>
+                      ) : '—'}
+                    </td>
+                    <td className="px-4 py-3 text-red-600 text-xs max-w-xs truncate" title={i.errorMsg ?? undefined}>{i.errorMsg ?? '—'}</td>
+                  </tr>
+                  {expandedIngestId === i.id && (i.stepLog || i.errorMsg) && (
+                    <tr className="bg-slate-50">
+                      <td colSpan={6} className="px-4 py-3">
+                        {i.stepLog && (
+                          <pre className="text-xs text-slate-600 whitespace-pre-wrap font-mono bg-white border border-slate-200 rounded-lg p-3 max-h-80 overflow-auto">
+                            {i.stepLog}
+                          </pre>
+                        )}
+                        {i.errorMsg && (
+                          <p className="text-xs text-red-600 mt-1">{i.errorMsg}</p>
+                        )}
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
               ))}
             </tbody>
           </table>

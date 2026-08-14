@@ -14,13 +14,18 @@ class LlmServiceTest {
         val service = LlmService(llmClient)
         every { llmClient.call(any(), any()) } returns """
             {"products":[{"className":"Multimeter","name":"Fluke 179","mpn":"FL179",
-              "price":320.0,"currency":"JOD","attributes":{"max_voltage":1000,"has_trms":true}}]}
+              "price":320.0,"currency":"JOD","attributes":{"description":"Portable true-RMS multimeter.",
+              "manualLink":"https://example.com/manual.pdf","max_voltage":1000,"has_trms":true}}]}
         """.trimIndent()
 
         val result = service.parseCatalogBatch("raw text", emptyList())
         assertThat(result).hasSize(1)
         assertThat(result[0].name).isEqualTo("Fluke 179")
         assertThat(result[0].mpn).isEqualTo("FL179")
+        assertThat(result[0].attributes["description"])
+            .isEqualTo("Portable true-RMS multimeter.")
+        assertThat(result[0].attributes["manualLink"])
+            .isEqualTo("https://example.com/manual.pdf")
     }
 
     @Test

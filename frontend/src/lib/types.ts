@@ -41,6 +41,7 @@ export interface MatchResultItem {
 export interface RfpReport {
   rfpId: number;
   status: string;
+  lineCount: number;
   items: MatchResultItem[];
 }
 
@@ -65,6 +66,7 @@ export interface AdminProduct {
   productClass: string | null;
   isStale: boolean;
   source: string | null;
+  attributes: string | null;
 }
 
 export interface IngestRecord {
@@ -76,6 +78,7 @@ export interface IngestRecord {
   finishedAt: string | null;
   errorMsg: string | null;
   itemsFound: number | null;
+  stepLog: string | null;
 }
 
 export interface AdminTender {

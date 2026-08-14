@@ -30,7 +30,7 @@ class AnthropicLlmClient(
     override fun call(systemPrompt: String, userMessage: String): String {
         val body = mapper.writeValueAsString(mapOf(
             "model" to model,
-            "max_tokens" to 4096,
+            "max_tokens" to 8192,
             "temperature" to 0,
             "system" to systemPrompt,
             "messages" to listOf(mapOf("role" to "user", "content" to userMessage))

@@ -49,6 +49,7 @@ class RfpController(
     @GetMapping("/{id}/report")
     fun report(@PathVariable id: Long): ResponseEntity<Map<String, Any?>> {
         val tender = tenderRepo.findById(id).orElseThrow { NoSuchElementException("Tender $id not found") }
+        val lineCount = tenderLineRepo.findByTenderId(id).size
         val results = matchResultRepo.findByLineTenderId(id).map { r ->
             mapOf(
                 "lineId" to r.line.id,
@@ -63,7 +64,7 @@ class RfpController(
                 "alternatives" to r.alternatives
             )
         }
-        return ResponseEntity.ok(mapOf("rfpId" to tender.id, "status" to tender.status, "items" to results))
+        return ResponseEntity.ok(mapOf("rfpId" to tender.id, "status" to tender.status, "lineCount" to lineCount, "items" to results))
     }
 
     @GetMapping("/{id}/report/export")

@@ -1,6 +1,7 @@
 package com.rfp.service
 
 import com.microsoft.playwright.BrowserType
+import com.microsoft.playwright.Page
 import com.microsoft.playwright.Playwright
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -11,6 +12,8 @@ import org.springframework.scheduling.annotation.Async
 import org.springframework.stereotype.Service
 import java.net.URL
 import java.util.concurrent.TimeUnit
+
+data class CrawlResult(val content: String, val stepLog: String)
 
 // open so tests can subclass and override runScrapeJobAsync without Playwright
 @Service
@@ -34,36 +37,106 @@ open class ScrapeService(
     /**
      * 3-stage pipeline:
      *   1. Fetch homepage (Playwright → HTTP fallback)
-     *   2. LLM identifies which links lead to product catalog pages
-     *   3. Fetch those pages, combine, return for LLM extraction
+     *   2. LLM identifies product catalog URLs from extracted link list
+     *   3. Fetch product pages (HTTP → Playwright fallback), strip HTML
+     * Returns combined stripped text + step log.
      */
-    fun crawlWebsite(baseUrl: String): String {
-        // Stage 1 — homepage
-        val homepageHtml = try {
-            crawlWithPlaywright(baseUrl)
-        } catch (_: Exception) {
-            crawlWithHttp(baseUrl)
-        }
+    fun crawlWebsite(baseUrl: String): CrawlResult {
+        val log = StringBuilder()
 
-        // Stage 2 — LLM discovers product page URLs
-        val discoveredUrls = llmService.identifyProductUrls(baseUrl, homepageHtml)
+        // Stage 1 — homepage
+        val (homepageHtml, stage1Method) = try {
+            Pair(crawlWithPlaywright(baseUrl), "playwright")
+        } catch (_: Exception) {
+            try {
+                Pair(crawlWithHttp(baseUrl), "http")
+            } catch (e: Exception) {
+                Pair("", "failed: ${e.message?.take(100)}")
+            }
+        }
+        val homepageStripped = stripHtml(homepageHtml)
+        log.append("=== Stage 1: Homepage ===\n")
+        log.append("URL: $baseUrl\n")
+        log.append("Method: $stage1Method\n")
+        log.append("Raw HTML: ${homepageHtml.length} chars → Stripped text: ${homepageStripped.length} chars\n\n")
+
+        // Stage 2 — LLM discovers product page URLs from focused link list
+        val navLinks = extractNavigationLinks(homepageHtml)
+        log.append("=== Stage 2: LLM URL Discovery ===\n")
+        log.append("Navigation links extracted: ${navLinks.lines().size} items\n")
+        val discoveredUrls = llmService.identifyProductUrls(baseUrl, navLinks)
             .map { resolveUrl(baseUrl, it) }
             .filter { it.isNotBlank() }
             .distinct()
             .take(8)
+        log.append("LLM discovered: ${discoveredUrls.size} product URL(s)\n")
+        discoveredUrls.forEach { log.append("  - $it\n") }
+        log.append("\n")
 
-        // Stage 3 — fetch product pages (throttled, failures silently skipped)
-        val productPages = discoveredUrls.mapNotNull { url ->
+        // Stage 3 — fetch product pages (HTTP → Playwright fallback, failures skipped)
+        log.append("=== Stage 3: Product Pages ===\n")
+        val productTexts = discoveredUrls.mapNotNull { url ->
             try {
                 Thread.sleep(throttleMs)
-                crawlWithHttp(url)
-            } catch (_: Exception) { null }
+                val (text, method) = fetchPageStripped(url)
+                log.append("  - $url: OK via $method (${text.length} chars stripped)\n")
+                text
+            } catch (e: Exception) {
+                log.append("  - $url: FAILED (${e.message?.take(120)})\n")
+                null
+            }
         }
+        log.append("\n")
 
-        val allContent = (listOf(homepageHtml) + productPages)
-            .joinToString("\n\n---PAGE---\n\n")
-        // LlmService takes first 12k — give generous raw content so product pages are included
-        return allContent.take(30000)
+        val allText = (listOf(homepageStripped) + productTexts)
+            .joinToString("\n\n--- next page ---\n\n")
+        val capped = allText.take(30000)
+
+        log.append("=== Extraction Input ===\n")
+        log.append("Combined text: ${allText.length} chars → capped to ${capped.length} chars\n")
+        log.append("Content preview (first 500 chars):\n${capped.take(500)}\n")
+
+        return CrawlResult(content = capped, stepLog = log.toString())
+    }
+
+    /** Fetch a URL and return (stripped text, method used). Tries HTTP first, then Playwright. */
+    private fun fetchPageStripped(url: String): Pair<String, String> {
+        return try {
+            val html = crawlWithHttp(url)
+            val stripped = stripHtml(html)
+            // Fall through to Playwright if HTTP returns sparse content (JS-rendered)
+            if (stripped.length < 800) throw RuntimeException("Too short via HTTP (${stripped.length} chars) — likely JS-rendered")
+            Pair(stripped, "http")
+        } catch (_: Exception) {
+            val html = crawlWithPlaywright(url)
+            Pair(stripHtml(html), "playwright")
+        }
+    }
+
+    /** Extract anchor tags as "label -> href" lines — much cleaner input for URL discovery than raw HTML. */
+    private fun extractNavigationLinks(html: String): String {
+        val linkRegex = Regex("""<a[^>]+href=["']([^"'#\s][^"']*)["'][^>]*>([^<]*)</a>""", RegexOption.IGNORE_CASE)
+        return linkRegex.findAll(html)
+            .take(300)
+            .map { m ->
+                val href = m.groupValues[1].trim()
+                val label = m.groupValues[2].trim().replace(Regex("\\s+"), " ")
+                if (label.isNotBlank()) "$label -> $href" else href
+            }
+            .filter { it.isNotBlank() }
+            .joinToString("\n")
+            .take(8000)
+    }
+
+    /** Remove script/style blocks and all HTML tags, collapse whitespace. */
+    internal fun stripHtml(html: String): String {
+        return html
+            .replace(Regex("<script[^>]*>[\\s\\S]*?</script>", setOf(RegexOption.IGNORE_CASE, RegexOption.MULTILINE)), " ")
+            .replace(Regex("<style[^>]*>[\\s\\S]*?</style>", setOf(RegexOption.IGNORE_CASE, RegexOption.MULTILINE)), " ")
+            .replace(Regex("<[^>]+>"), " ")
+            .replace(Regex("&[a-zA-Z]+;"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
     }
 
     private fun resolveUrl(base: String, href: String): String {
@@ -79,8 +152,9 @@ open class ScrapeService(
         Playwright.create().use { pw ->
             val browser = pw.chromium().launch(BrowserType.LaunchOptions().setHeadless(true))
             val page = browser.newPage()
-            page.navigate(url)
-            page.waitForLoadState()
+            page.navigate(url, Page.NavigateOptions().setTimeout(30000.0))
+            // networkidle ensures JS-rendered content (dynamic product listings) is loaded
+            page.waitForLoadState(com.microsoft.playwright.options.LoadState.NETWORKIDLE)
             val html = page.content()
             browser.close()
             return html

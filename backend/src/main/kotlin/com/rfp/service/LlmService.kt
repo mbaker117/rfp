@@ -21,13 +21,52 @@ class LlmService(private val llmClient: LlmClient) {
     }
 
     private fun parseJson(raw: String) = try {
-        // Strip markdown code fences that some models add
         val cleaned = raw.trim()
             .removePrefix("```json").removePrefix("```")
             .trimStart().removeSuffix("```").trimEnd()
         mapper.readTree(cleaned)
-    } catch (e: Exception) {
-        throw LlmException("Failed to parse LLM JSON: ${raw.take(300)}")
+    } catch (_: Exception) {
+        // Try to salvage truncated JSON: find all complete top-level objects in a "products" array
+        repairTruncatedProductsJson(raw)
+            ?: throw LlmException("Failed to parse LLM JSON: ${raw.take(300)}")
+    }
+
+    /**
+     * When a large catalog response is truncated mid-JSON, reconstruct a valid document
+     * from all complete product objects found so far.
+     */
+    private fun repairTruncatedProductsJson(raw: String): com.fasterxml.jackson.databind.JsonNode? {
+        return try {
+            val cleaned = raw.trim().removePrefix("```json").removePrefix("```").trimStart()
+            // Find the products array start
+            val arrayStart = cleaned.indexOf("[", cleaned.indexOf("\"products\"").takeIf { it >= 0 } ?: return null)
+            if (arrayStart < 0) return null
+            // Walk char-by-char to collect complete objects at depth 1
+            val products = StringBuilder("[")
+            var depth = 0
+            var objStart = -1
+            var addedCount = 0
+            var i = arrayStart + 1
+            while (i < cleaned.length) {
+                when (cleaned[i]) {
+                    '{' -> { if (depth == 0) objStart = i; depth++ }
+                    '}' -> {
+                        depth--
+                        if (depth == 0 && objStart >= 0) {
+                            if (addedCount > 0) products.append(",")
+                            products.append(cleaned.substring(objStart, i + 1))
+                            addedCount++
+                            objStart = -1
+                        }
+                    }
+                    ']' -> if (depth == 0) break
+                }
+                i++
+            }
+            products.append("]")
+            if (addedCount == 0) null
+            else mapper.readTree("{\"products\":$products}")
+        } catch (_: Exception) { null }
     }
 
     // Task 1: parse raw catalog text into structured products
@@ -38,16 +77,18 @@ class LlmService(private val llmClient: LlmClient) {
                 "${c.name}: ${c.attributes.joinToString(", ") { "${it.name}(${it.datatype}${it.canonicalUnit?.let { u -> ", unit=$u" } ?: ""})" }}"
             }
         val system = """
-            Extract all products from the raw catalog text.
+            Extract all products from the raw catalog text (may be Arabic, English, or both).
             $classHint
             Use existing class names when the product fits. Create a new class_name only when none fit.
             Use existing attribute key names when the class matches; add new keys only when needed.
-            Respond ONLY with valid JSON:
+            For EVERY product, also capture inside "attributes":
+              - "description": a short plain-text summary of the product (1-2 sentences, in English)
+              - "manualLink": the URL to the product datasheet or manual page, if found on the page (null if not present)
+            Respond ONLY with valid JSON — no markdown, no commentary:
             {"products":[{"className":string,"name":string,"mpn":string|null,
-              "price":number|null,"currency":string,"attributes":{key:value}}]}
-            Handle Arabic and English. Do not add commentary.
+              "price":number|null,"currency":string,"attributes":{"description":string,"manualLink":string|null,...otherKeys}}]}
         """.trimIndent()
-        val json = parseJson(call(system, rawText.take(20000)))
+        val json = parseJson(llmClient.call(system, rawText.take(20000)))   // skip cache — site content varies
         val products = json["products"] ?: throw LlmException("LLM response missing 'products' key")
         return products.map { p ->
             ParsedProduct(
@@ -93,18 +134,19 @@ class LlmService(private val llmClient: LlmClient) {
         )
     }
 
-    // Task 2b: given homepage HTML, find product catalog URLs
-    fun identifyProductUrls(baseUrl: String, homepageHtml: String): List<String> {
+    // Task 2b: given navigation links extracted from homepage, find product catalog URLs
+    fun identifyProductUrls(baseUrl: String, navigationLinks: String): List<String> {
         val system = """
-            You are analyzing the HTML of a supplier website homepage.
+            You are analyzing navigation links extracted from a supplier website.
+            Each line is "link label -> href" or just a URL/path.
             Identify all URLs or paths that lead to product catalog pages, product listings, or product category pages.
-            Ignore: contact, about, blog, news, login, register, social media, privacy, terms, FAQ.
+            Ignore: contact, about, blog, news, login, register, social media, privacy, terms, FAQ, careers.
             Return ONLY a JSON array of up to 8 URLs (absolute or relative paths starting with / or http):
             ["url1", "url2"]
             If no product pages are found return [].
             Do not add commentary or markdown.
         """.trimIndent()
-        val user = "Base URL: $baseUrl\n\nHomepage HTML:\n${homepageHtml.take(8000)}"
+        val user = "Base URL: $baseUrl\n\nNavigation links:\n${navigationLinks.take(8000)}"
         return try {
             val raw = llmClient.call(system, user)   // skip cache — each site is unique
             val cleaned = raw.trim()

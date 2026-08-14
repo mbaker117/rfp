@@ -33,7 +33,7 @@ class OpenAiLlmClient(
                 mapOf("role" to "system", "content" to systemPrompt),
                 mapOf("role" to "user", "content" to userMessage)
             ),
-            "max_tokens" to 4096
+            "max_tokens" to 8192
         ))
         val request = Request.Builder()
             .url("${baseUrl}chat/completions")

@@ -41,6 +41,7 @@ class RfpControllerTest {
     @WithMockUser
     fun `GET report returns 200 with rfpId and empty items`() {
         every { tenderRepo.findById(1L) } returns Optional.of(tender)
+        every { tenderLineRepo.findByTenderId(1L) } returns emptyList()
         every { matchResultRepo.findByLineTenderId(1L) } returns emptyList()
 
         mvc.perform(get("/rfp/1/report"))

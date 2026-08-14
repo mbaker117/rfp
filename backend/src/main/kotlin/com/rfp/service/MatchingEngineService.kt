@@ -6,6 +6,7 @@ import com.rfp.domain.*
 import com.rfp.repository.*
 import org.springframework.scheduling.annotation.Async
 import org.springframework.stereotype.Service
+import org.springframework.transaction.annotation.Transactional
 import kotlin.math.abs
 
 data class AttributeVerdict(
@@ -30,6 +31,7 @@ open class MatchingEngineService(
     private val mapper = ObjectMapper().apply { findAndRegisterModules() }
 
     @Async("taskExecutor")
+    @Transactional
     open fun matchAsync(tenderId: Long) {
         val tender = tenderRepo.findById(tenderId).orElseThrow()
         if (tender.status == "matching" || tender.status == "done") return

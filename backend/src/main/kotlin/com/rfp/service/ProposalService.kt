@@ -6,6 +6,7 @@ import com.rfp.domain.*
 import com.rfp.repository.*
 import org.springframework.scheduling.annotation.Async
 import org.springframework.stereotype.Service
+import org.springframework.transaction.annotation.Transactional
 import java.math.BigDecimal
 import java.math.RoundingMode
 import java.time.Instant
@@ -49,8 +50,10 @@ open class ProposalService(
     private val llmService: LlmService
 ) {
     private val mapper = ObjectMapper().apply { findAndRegisterModules() }
+    private val logger = org.slf4j.LoggerFactory.getLogger(ProposalService::class.java)
 
     @Async("taskExecutor")
+    @Transactional
     open fun generateProposals(tenderId: Long) {
         val tender = tenderRepo.findById(tenderId).orElseThrow()
         val lines = tenderLineRepo.findByTenderId(tenderId)
@@ -71,7 +74,7 @@ open class ProposalService(
                 val avgScore = pLines.mapNotNull { it.matchScore }
                     .takeIf { it.isNotEmpty() }
                     ?.let { list -> list.reduce(BigDecimal::add).divide(BigDecimal(list.size), 2, RoundingMode.HALF_UP) }
-                val isComplete = pLines.none { it.selectedProduct == null || it.acceptanceProbability == BigDecimal.ZERO }
+                val isComplete = pLines.none { it.selectedProduct == null || it.acceptanceProbability?.compareTo(BigDecimal.ZERO) == 0 }
                 proposalRepo.save(proposal.copy(
                     acceptanceRate = avgAcceptance,
                     matchScore = avgScore,
@@ -160,11 +163,21 @@ open class ProposalService(
         data class Candidate(val product: Product, val score: Int, val price: BigDecimal?)
 
         val candidates = mutableListOf<Candidate>()
-        val mainPrice = productPriceRepo.findById(matchResult.product.id).orElse(null)?.price
-        candidates.add(Candidate(matchResult.product, matchResult.score, mainPrice))
+        if (matchResult.score > 0) {
+            val mainPrice = productPriceRepo.findById(matchResult.product.id).orElse(null)?.price
+            candidates.add(Candidate(matchResult.product, matchResult.score, mainPrice))
+        }
         alts.filter { it.score > 0 }.forEach { alt ->
             productRepo.findById(alt.productId).orElse(null)?.let { p ->
                 candidates.add(Candidate(p, alt.score, alt.price))
+            }
+        }
+        // Fallback: if no candidates passed score > 0, pick the highest-score alt regardless
+        if (candidates.isEmpty()) {
+            alts.maxByOrNull { it.score }?.let { fallback ->
+                productRepo.findById(fallback.productId).orElse(null)?.let { p ->
+                    candidates.add(Candidate(p, fallback.score, fallback.price))
+                }
             }
         }
         val cheapest = candidates.sortedWith { a, b ->
@@ -199,7 +212,7 @@ open class ProposalService(
                 price = price?.price,
                 currency = price?.currency ?: "JOD"
             )
-        } catch (_: Exception) { null }
+        } catch (e: Exception) { logger.error("estimateAcceptance failed for product ${product.id}", e); null }
     }
 
     private fun buildVerdictsStr(matchResult: MatchResult?, alts: List<EnrichedAlt>, productId: Long): String {
@@ -215,6 +228,7 @@ open class ProposalService(
     }
 
     @Async("taskExecutor")
+    @Transactional
     open fun overrideLine(proposalId: Long, lineId: Long, newProductId: Long) {
         val proposal = proposalRepo.findById(proposalId).orElseThrow()
         val pl = proposalLineRepo.findByProposalIdAndLineId(proposalId, lineId) ?: return
@@ -268,7 +282,7 @@ open class ProposalService(
         val avgScore = allLines.mapNotNull { it.matchScore }
             .takeIf { it.isNotEmpty() }
             ?.let { list -> list.reduce(BigDecimal::add).divide(BigDecimal(list.size), 2, RoundingMode.HALF_UP) }
-        val isComplete = allLines.none { it.selectedProduct == null || it.acceptanceProbability == BigDecimal.ZERO }
+        val isComplete = allLines.none { it.selectedProduct == null || it.acceptanceProbability?.compareTo(BigDecimal.ZERO) == 0 }
         proposalRepo.save(proposal.copy(
             acceptanceRate = avgAcceptance,
             matchScore = avgScore,

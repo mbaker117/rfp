@@ -30,7 +30,7 @@ class SecurityConfig(private val jwtFilter: JwtFilter) {
     fun corsConfigurationSource(): CorsConfigurationSource {
         val config = CorsConfiguration()
         config.allowedOrigins = listOf("http://localhost:3000")
-        config.allowedMethods = listOf("GET", "POST", "PUT", "DELETE", "OPTIONS")
+        config.allowedMethods = listOf("GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH")
         config.allowedHeaders = listOf("Authorization", "Content-Type")
         config.allowCredentials = true
         val source = UrlBasedCorsConfigurationSource()

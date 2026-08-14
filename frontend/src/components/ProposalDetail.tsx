@@ -1,5 +1,5 @@
 'use client';
-import { Fragment, useState, useCallback } from 'react';
+import { Fragment, useState, useCallback, useEffect } from 'react';
 import type { Proposal, ProposalLine, ProposalAlternative, ProductSearchResult } from '@/src/lib/types';
 import { api } from '@/src/lib/api';
 
@@ -136,15 +136,34 @@ export function ProposalDetail({ rfpId, proposal, token, onProposalChange }: Pro
   const [expandedLineId, setExpandedLineId] = useState<number | null>(null);
   const [changingLineId, setChangingLineId] = useState<number | null>(null);
   const [overridingLineId, setOverridingLineId] = useState<number | null>(null);
+  const [overrideStartTime, setOverrideStartTime] = useState<number | null>(null);
+
+  // Poll every 2s while an override is in flight, until acceptanceProbability appears or 30s timeout
+  useEffect(() => {
+    if (overridingLineId === null) return;
+    const targetLine = proposal.lines.find(l => l.lineId === overridingLineId);
+    const isDone = targetLine?.acceptanceProbability !== null && targetLine?.acceptanceProbability !== undefined;
+    const isTimedOut = overrideStartTime !== null && Date.now() - overrideStartTime > 30000;
+    if (isDone || isTimedOut) {
+      setOverridingLineId(null);
+      setOverrideStartTime(null);
+      return;
+    }
+    const t = setTimeout(() => onProposalChange(), 2000);
+    return () => clearTimeout(t);
+  }, [overridingLineId, proposal.lines, onProposalChange, overrideStartTime]);
 
   const handleOverride = useCallback(async (lineId: number, productId: number) => {
     setOverridingLineId(lineId);
+    setOverrideStartTime(Date.now());
     setChangingLineId(null);
     try {
       await api.proposals.override(rfpId, proposal.id, lineId, productId, token);
       onProposalChange();
-    } finally {
+      // overridingLineId is intentionally NOT cleared here — the useEffect polls until done
+    } catch {
       setOverridingLineId(null);
+      setOverrideStartTime(null);
     }
   }, [rfpId, proposal.id, token, onProposalChange]);
 

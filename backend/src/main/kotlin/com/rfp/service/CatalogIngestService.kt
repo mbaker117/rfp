@@ -113,7 +113,7 @@ open class CatalogIngestService(
             .filter { it.id !in seenIds && !it.isStale }
             .forEach { productRepo.save(it.copy(isStale = true)) }
 
-        ingestRepo.save(ingest.copy(status = "DONE", finishedAt = Instant.now()))
+        ingestRepo.save(ingest.copy(status = "DONE", itemsFound = seenIds.size, finishedAt = Instant.now()))
         // Mark the supplier as freshly scraped so CatalogRefreshJob picks up the right cutoff
         supplierRepo.save(ingest.supplier.copy(scrapeStatus = "DONE", lastScrapedAt = Instant.now()))
     }

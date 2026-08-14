@@ -14,6 +14,7 @@ data class CatalogIngest(
     val filename: String? = null,
     val status: String = "PENDING",
     val errorMsg: String? = null,
+    val itemsFound: Int? = null,
     val startedAt: Instant? = null,
     val finishedAt: Instant? = null
 )

@@ -136,6 +136,7 @@ export default function SupplierDetailPage() {
                 <th className="text-left px-4 py-3 text-xs font-medium uppercase tracking-wide text-slate-500">Status</th>
                 <th className="text-left px-4 py-3 text-xs font-medium uppercase tracking-wide text-slate-500">Started</th>
                 <th className="text-left px-4 py-3 text-xs font-medium uppercase tracking-wide text-slate-500">Finished</th>
+                <th className="text-left px-4 py-3 text-xs font-medium uppercase tracking-wide text-slate-500">Items Found</th>
                 <th className="text-left px-4 py-3 text-xs font-medium uppercase tracking-wide text-slate-500">Error / Notes</th>
               </tr>
             </thead>
@@ -153,6 +154,13 @@ export default function SupplierDetailPage() {
                   </td>
                   <td className="px-4 py-3 text-slate-500 text-xs">{i.startedAt ? new Date(i.startedAt).toLocaleString() : '—'}</td>
                   <td className="px-4 py-3 text-slate-500 text-xs">{i.finishedAt ? new Date(i.finishedAt).toLocaleString() : '—'}</td>
+                  <td className="px-4 py-3 text-slate-700 text-sm font-medium">
+                    {i.itemsFound !== null ? (
+                      <span className={i.itemsFound === 0 ? 'text-amber-600' : 'text-emerald-600'}>
+                        {i.itemsFound}
+                      </span>
+                    ) : '—'}
+                  </td>
                   <td className="px-4 py-3 text-red-600 text-xs max-w-xs truncate" title={i.errorMsg ?? undefined}>{i.errorMsg ?? '—'}</td>
                 </tr>
               ))}

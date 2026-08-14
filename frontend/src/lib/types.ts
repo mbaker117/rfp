@@ -74,6 +74,7 @@ export interface IngestRecord {
   startedAt: string | null;
   finishedAt: string | null;
   errorMsg: string | null;
+  itemsFound: number | null;
 }
 
 export interface AdminTender {

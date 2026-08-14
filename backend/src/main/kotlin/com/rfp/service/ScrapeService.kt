@@ -33,13 +33,73 @@ open class ScrapeService(
         .followRedirects(true)
         .build()
 
-    fun crawlWebsite(url: String): String {
-        return try {
-            crawlWithPlaywright(url)
+    // Product-related path keywords to probe when homepage yields little content
+    private val productPaths = listOf(
+        "/products", "/product", "/catalog", "/catalogue",
+        "/shop", "/store", "/items", "/instruments",
+        "/equipment", "/hardware", "/solutions"
+    )
+
+    fun crawlWebsite(baseUrl: String): String {
+        val homepageHtml = try {
+            crawlWithPlaywright(baseUrl)
         } catch (e: Exception) {
-            // Playwright not installed or failed — fall back to plain HTTP fetch
-            crawlWithHttp(url)
+            crawlWithHttp(baseUrl)
         }
+
+        // Try to extract product sub-pages from the homepage HTML
+        val additionalPages = extractProductLinks(baseUrl, homepageHtml)
+            .take(5)  // cap at 5 additional pages to avoid runaway
+            .mapNotNull { link ->
+                try {
+                    Thread.sleep(throttleMs)
+                    crawlWithHttp(link)
+                } catch (_: Exception) { null }
+            }
+
+        // Also probe common product paths if few links were found
+        val probedPages = if (additionalPages.size < 2) {
+            val origin = baseUrl.trimEnd('/')
+            productPaths.mapNotNull { path ->
+                try {
+                    Thread.sleep(throttleMs)
+                    val html = crawlWithHttp("$origin$path")
+                    if (html.length > 500) html else null
+                } catch (_: Exception) { null }
+            }.take(3)
+        } else emptyList()
+
+        val allContent = (listOf(homepageHtml) + additionalPages + probedPages)
+            .joinToString("\n\n---PAGE---\n\n")
+        return allContent.take(24000)  // LLM will take first 12k; give more raw content
+    }
+
+    private fun extractProductLinks(baseUrl: String, html: String): List<String> {
+        val origin = try {
+            val u = java.net.URL(baseUrl)
+            "${u.protocol}://${u.host}${if (u.port > 0 && u.port != 80 && u.port != 443) ":${u.port}" else ""}"
+        } catch (_: Exception) { return emptyList() }
+
+        val linkRegex = Regex("""href=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
+        val keywords = setOf("product", "catalog", "catalogue", "shop", "item",
+            "instrument", "equipment", "hardware", "solution")
+        return linkRegex.findAll(html)
+            .map { it.groupValues[1] }
+            .filter { href ->
+                val lower = href.lowercase()
+                keywords.any { lower.contains(it) }
+            }
+            .map { href ->
+                when {
+                    href.startsWith("http") -> href
+                    href.startsWith("//") -> "https:$href"
+                    href.startsWith("/") -> "$origin$href"
+                    else -> "$origin/$href"
+                }
+            }
+            .filter { it.startsWith(origin) }  // stay on same domain
+            .distinct()
+            .toList()
     }
 
     private fun crawlWithPlaywright(url: String): String {

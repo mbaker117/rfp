@@ -31,6 +31,7 @@ open class MatchingEngineService(
     @Async("taskExecutor")
     open fun matchAsync(tenderId: Long) {
         val tender = tenderRepo.findById(tenderId).orElseThrow()
+        if (tender.status == "matching" || tender.status == "done") return
         val supplierIds = tenderSupplierRepo.findSupplierIdsByTenderId(tenderId)
         tenderRepo.save(tender.copy(status = "matching"))
         try {

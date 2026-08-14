@@ -20,7 +20,7 @@ class SecurityConfig(private val jwtFilter: JwtFilter) {
         .sessionManagement { it.sessionCreationPolicy(SessionCreationPolicy.STATELESS) }
         .authorizeHttpRequests {
             it.requestMatchers("/auth/**").permitAll()
-            it.requestMatchers("/admin/**").authenticated()
+            it.requestMatchers("/admin/**").hasRole("ADMIN")
             it.anyRequest().authenticated()
         }
         .addFilterBefore(jwtFilter, UsernamePasswordAuthenticationFilter::class.java)

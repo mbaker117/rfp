@@ -18,10 +18,11 @@ class JwtFilter(private val jwtUtil: JwtUtil) : OncePerRequestFilter() {
     ) {
         val header = request.getHeader("Authorization")
         if (header != null && header.startsWith("Bearer ")) {
-            val userId = jwtUtil.validateToken(header.removePrefix("Bearer "))
-            if (userId != null) {
+            val claim = jwtUtil.validateToken(header.removePrefix("Bearer "))
+            if (claim != null) {
+                val (userId, role) = claim
                 val auth = UsernamePasswordAuthenticationToken(
-                    userId, null, listOf(SimpleGrantedAuthority("ROLE_USER"))
+                    userId, null, listOf(SimpleGrantedAuthority("ROLE_$role"))
                 )
                 SecurityContextHolder.getContext().authentication = auth
             }

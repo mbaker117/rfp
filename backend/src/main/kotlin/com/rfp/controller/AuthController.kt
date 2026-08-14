@@ -23,7 +23,7 @@ class AuthController(
         if (userRepo.findByUsername(req.username) != null)
             return ResponseEntity.badRequest().build()
         val saved = userRepo.save(AppUser(username = req.username, passwordHash = encoder.encode(req.password)))
-        return ResponseEntity.ok(AuthResponse(jwtUtil.generateToken(saved.id)))
+        return ResponseEntity.ok(AuthResponse(jwtUtil.generateToken(saved.id, saved.role)))
     }
 
     @PostMapping("/login")
@@ -32,6 +32,6 @@ class AuthController(
             ?: return ResponseEntity.status(401).build()
         if (!encoder.matches(req.password, user.passwordHash))
             return ResponseEntity.status(401).build()
-        return ResponseEntity.ok(AuthResponse(jwtUtil.generateToken(user.id)))
+        return ResponseEntity.ok(AuthResponse(jwtUtil.generateToken(user.id, user.role)))
     }
 }

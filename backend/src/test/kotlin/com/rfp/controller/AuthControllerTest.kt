@@ -21,7 +21,7 @@ class AuthControllerTest {
             val u = firstArg<AppUser>()
             u.copy(id = 1L)
         }
-        every { jwtUtil.generateToken(1L) } returns "tok123"
+        every { jwtUtil.generateToken(1L, "USER") } returns "tok123"
 
         val resp = controller.register(AuthRequest("alice", "secret"))
         assertThat(resp.statusCode.value()).isEqualTo(200)

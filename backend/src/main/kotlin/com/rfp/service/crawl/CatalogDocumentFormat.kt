@@ -19,9 +19,18 @@ internal enum class CatalogDocumentFormat(
 
 internal object CatalogDocumentFormatDetector {
     fun fromMediaType(contentType: String?): CatalogDocumentFormat? {
-        val normalized = contentType?.substringBefore(';')?.trim()?.lowercase(Locale.ROOT) ?: return null
+        val normalized = normalizedMediaType(contentType) ?: return null
         return CatalogDocumentFormat.entries.firstOrNull { it.mediaType == normalized }
     }
+
+    fun normalizedMediaType(contentType: String?): String? = contentType
+        ?.substringBefore(';')
+        ?.trim()
+        ?.lowercase(Locale.ROOT)
+        ?.ifEmpty { null }
+
+    fun isGenericMediaType(contentType: String?): Boolean =
+        normalizedMediaType(contentType) in GENERIC_MEDIA_TYPES
 
     fun fromUrl(uri: URI): CatalogDocumentFormat? {
         val extension = uri.path?.substringAfterLast('.', "")?.lowercase(Locale.ROOT).orEmpty()
@@ -41,5 +50,11 @@ internal object CatalogDocumentFormatDetector {
         "catalog",
         "specification",
         "spec-sheet",
+    )
+
+    private val GENERIC_MEDIA_TYPES = setOf(
+        null,
+        "application/octet-stream",
+        "binary/octet-stream",
     )
 }

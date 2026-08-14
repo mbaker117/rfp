@@ -1,6 +1,12 @@
 package com.rfp.service.crawl
 
 import org.apache.pdfbox.Loader
+import org.apache.pdfbox.cos.COSArray
+import org.apache.pdfbox.cos.COSBase
+import org.apache.pdfbox.cos.COSDictionary
+import org.apache.pdfbox.cos.COSObject
+import org.apache.pdfbox.cos.COSStream
+import org.apache.pdfbox.pdmodel.PDDocument
 import org.apache.pdfbox.pdmodel.encryption.InvalidPasswordException
 import org.apache.pdfbox.text.PDFTextStripper
 import org.apache.poi.EncryptedDocumentException
@@ -15,50 +21,43 @@ import org.apache.poi.xwpf.usermodel.XWPFParagraph
 import org.apache.poi.xwpf.usermodel.XWPFTable
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
+import org.jsoup.nodes.TextNode
 import java.io.ByteArrayInputStream
 import java.io.Writer
 import java.net.URI
-import java.nio.charset.Charset
 import java.time.Duration
+import java.util.ArrayDeque
+import java.util.Collections
+import java.util.IdentityHashMap
 import java.util.Locale
 import javax.swing.text.rtf.RTFEditorKit
 
 class CatalogDocumentParser(
-    private val maxDocumentBytes: Int = 10 * 1024 * 1024,
-    private val maxPages: Int = 200,
-    private val maxSheets: Int = 100,
-    private val maxSections: Int = 2_000,
-    private val maxExpandedBytes: Long = 50L * 1024 * 1024,
-    private val maxArchiveEntryBytes: Long = 16L * 1024 * 1024,
-    private val maxArchiveEntries: Int = 2_000,
-    private val maxTextCharacters: Long = 2_000_000,
-    private val maxRows: Long = 100_000,
-    private val maxCells: Long = 1_000_000,
-    private val maxParagraphs: Long = 100_000,
-    private val maxTableRows: Long = 100_000,
-    private val maximumDuration: Duration = Duration.ofSeconds(20),
-    private val nanoTimeSource: NanoTimeSource = SystemNanoTimeSource,
+    maxDocumentBytes: Int = 10 * 1024 * 1024,
+    maxPages: Int = 200,
+    maxSheets: Int = 100,
+    maxSections: Int = 2_000,
+    maxExpandedBytes: Long = 50L * 1024 * 1024,
+    maxArchiveEntryBytes: Long = 16L * 1024 * 1024,
+    maxArchiveEntries: Int = 2_000,
+    maxTextCharacters: Long = 2_000_000,
+    maxRows: Long = 100_000,
+    maxCells: Long = 1_000_000,
+    maxParagraphs: Long = 100_000,
+    maxTableRows: Long = 100_000,
+    maxXmlDepth: Int = 128,
+    maxXmlElements: Long = 1_000_000,
+    maxRuns: Long = 1_000_000,
+    maximumDuration: Duration = Duration.ofSeconds(20),
+    workerMaxHeapMegabytes: Int = 128,
+    maxWorkerOutputBytes: Long = 16L * 1024 * 1024,
 ) {
-    init {
-        require(maxDocumentBytes > 0)
-        require(maxPages > 0)
-        require(maxSheets > 0)
-        require(maxSections > 0)
-        require(maxExpandedBytes > 0)
-        require(maxArchiveEntryBytes > 0)
-        require(maxArchiveEntries > 0)
-        require(maxTextCharacters > 0)
-        require(maxRows > 0)
-        require(maxCells > 0)
-        require(maxParagraphs > 0)
-        require(maxTableRows > 0)
-        require(!maximumDuration.isNegative && !maximumDuration.isZero)
-    }
-
-    fun parse(bytes: ByteArray, contentType: String, sourceUrl: URI): ParsedDocument {
-        if (bytes.size > maxDocumentBytes) reject(DocumentRejectionReason.OVERSIZED)
-        val deadline = DeadlineBudget.start(maximumDuration, nanoTimeSource)
-        val limits = DocumentResourceLimits(
+    private val worker = CatalogDocumentWorkerClient(
+        settings = CatalogDocumentParserSettings(
+            maxDocumentBytes,
+            maxPages,
+            maxSheets,
+            maxSections,
             maxExpandedBytes,
             maxArchiveEntryBytes,
             maxArchiveEntries,
@@ -67,6 +66,48 @@ class CatalogDocumentParser(
             maxCells,
             maxParagraphs,
             maxTableRows,
+            maxXmlDepth,
+            maxXmlElements,
+            maxRuns,
+        ),
+        maximumDuration = maximumDuration,
+        workerMaxHeapMegabytes = workerMaxHeapMegabytes,
+        maxWorkerOutputBytes = maxWorkerOutputBytes,
+    )
+
+    fun parse(bytes: ByteArray, contentType: String, sourceUrl: URI): ParsedDocument =
+        worker.parse(bytes, contentType, sourceUrl)
+}
+
+internal class CatalogDocumentParserCore(
+    private val settings: CatalogDocumentParserSettings,
+    private val nanoTimeSource: NanoTimeSource = SystemNanoTimeSource,
+) {
+    private val maxDocumentBytes = settings.maxDocumentBytes
+    private val maxPages = settings.maxPages
+    private val maxSheets = settings.maxSheets
+    private val maxSections = settings.maxSections
+
+    fun parse(
+        bytes: ByteArray,
+        contentType: String,
+        sourceUrl: URI,
+        maximumDuration: Duration,
+    ): ParsedDocument {
+        if (bytes.size > maxDocumentBytes) reject(DocumentRejectionReason.OVERSIZED)
+        val deadline = DeadlineBudget.start(maximumDuration, nanoTimeSource)
+        val limits = DocumentResourceLimits(
+            settings.maxExpandedBytes,
+            settings.maxArchiveEntryBytes,
+            settings.maxArchiveEntries,
+            settings.maxTextCharacters,
+            settings.maxRows,
+            settings.maxCells,
+            settings.maxParagraphs,
+            settings.maxTableRows,
+            settings.maxXmlDepth,
+            settings.maxXmlElements,
+            settings.maxRuns,
         )
         return try {
             val format = CatalogDocumentPreflight(limits, deadline).inspect(bytes, contentType, sourceUrl)
@@ -77,7 +118,8 @@ class CatalogDocumentParser(
                 CatalogDocumentFormat.DOC -> parseDoc(bytes, sourceUrl, budget)
                 CatalogDocumentFormat.XLS, CatalogDocumentFormat.XLSX -> parseWorkbook(bytes, sourceUrl, budget)
                 CatalogDocumentFormat.TEXT -> parseText(bytes, contentType, sourceUrl, budget)
-                CatalogDocumentFormat.HTML, CatalogDocumentFormat.XHTML -> parseHtml(bytes, sourceUrl, budget)
+                CatalogDocumentFormat.HTML, CatalogDocumentFormat.XHTML ->
+                    parseHtml(bytes, contentType, sourceUrl, budget)
             }
             budget.checkTime()
             ParsedDocument(sourceUrl, format.mediaType, parsed)
@@ -100,6 +142,7 @@ class CatalogDocumentParser(
         budget.checkTime()
         if (document.isEncrypted) reject(DocumentRejectionReason.ENCRYPTED)
         if (document.numberOfPages > maxPages) reject(DocumentRejectionReason.PAGE_LIMIT_EXCEEDED)
+        inspectPdfStreams(document, budget)
         (1..document.numberOfPages).mapNotNull { page ->
             budget.checkTime()
             val writer = BoundedTextWriter(budget)
@@ -110,6 +153,36 @@ class CatalogDocumentParser(
             val text = writer.toString().trim()
             text.takeIf(String::isNotEmpty)?.let {
                 DocumentFragment(it, DocumentProvenance(sourceUrl, page = page))
+            }
+        }
+    }
+
+    private fun inspectPdfStreams(document: PDDocument, budget: ParseWorkBudget) {
+        val pending = ArrayDeque<COSBase>()
+        pending.add(document.document.trailer)
+        document.document.xrefTable.keys.forEach { key -> pending.add(document.document.getObjectFromPool(key)) }
+        val visited = Collections.newSetFromMap(IdentityHashMap<COSBase, Boolean>())
+        val buffer = ByteArray(8192)
+        while (pending.isNotEmpty()) {
+            budget.checkTime()
+            val candidate = pending.removeLast()
+            val value = if (candidate is COSObject) candidate.getObject() ?: continue else candidate
+            if (!visited.add(value)) continue
+            when (value) {
+                is COSStream -> {
+                    var streamBytes = 0L
+                    value.createInputStream().use { decoded ->
+                        while (true) {
+                            val read = decoded.read(buffer)
+                            if (read < 0) break
+                            streamBytes += read
+                            budget.addExpandedBytes(read, streamBytes)
+                        }
+                    }
+                    value.values.forEach(pending::add)
+                }
+                is COSDictionary -> value.values.forEach(pending::add)
+                is COSArray -> value.forEach(pending::add)
             }
         }
     }
@@ -223,17 +296,20 @@ class CatalogDocumentParser(
         sourceUrl: URI,
         budget: ParseWorkBudget,
     ): List<DocumentFragment> {
-        val charset = contentType.substringAfter("charset=", "UTF-8").substringBefore(';').trim()
-            .let { runCatching { Charset.forName(it) }.getOrDefault(Charsets.UTF_8) }
-        val text = bytes.toString(charset).trim()
+        val text = decodeTextStrict(bytes, contentType).trim()
         budget.addTextCharacters(text.length)
         return text.takeIf(String::isNotEmpty)?.let {
             listOf(DocumentFragment(it, DocumentProvenance(sourceUrl, section = "Document")))
         }.orEmpty()
     }
 
-    private fun parseHtml(bytes: ByteArray, sourceUrl: URI, budget: ParseWorkBudget): List<DocumentFragment> {
-        val decoded = bytes.toString(Charsets.UTF_8)
+    private fun parseHtml(
+        bytes: ByteArray,
+        contentType: String,
+        sourceUrl: URI,
+        budget: ParseWorkBudget,
+    ): List<DocumentFragment> {
+        val decoded = decodeTextStrict(bytes, contentType)
         budget.addTextCharacters(decoded.length)
         val document = Jsoup.parse(decoded, sourceUrl.toString())
         budget.checkTime()
@@ -249,6 +325,7 @@ class CatalogDocumentParser(
         }
         fun walk(element: Element) {
             budget.checkTime()
+            if (element.tagName() in NON_VISIBLE_TAGS) return
             if (element.tagName() in HEADING_TAGS) {
                 flush()
                 section = element.text().trim().ifEmpty { "Document" }
@@ -265,11 +342,11 @@ class CatalogDocumentParser(
                 flush()
                 section = semanticLabel
             }
-            if (element.tagName() in TEXT_BLOCKS) {
-                element.text().trim().takeIf(String::isNotEmpty)?.let(sectionText::add)
-            } else {
-                element.ownText().trim().takeIf(String::isNotEmpty)?.let(sectionText::add)
-                element.children().forEach(::walk)
+            element.childNodes().forEach { node ->
+                when (node) {
+                    is TextNode -> node.text().trim().takeIf(String::isNotEmpty)?.let(sectionText::add)
+                    is Element -> walk(node)
+                }
             }
             if (semanticLabel != null || element.tagName() in SEMANTIC_CONTAINERS) {
                 flush()
@@ -310,6 +387,6 @@ class CatalogDocumentParser(
     private companion object {
         val HEADING_TAGS = setOf("h1", "h2", "h3", "h4", "h5", "h6")
         val SEMANTIC_CONTAINERS = setOf("section", "article", "main", "nav", "aside")
-        val TEXT_BLOCKS = setOf("p", "li", "dt", "dd", "pre", "blockquote", "td", "th", "caption")
+        val NON_VISIBLE_TAGS = setOf("script", "style", "noscript", "template")
     }
 }

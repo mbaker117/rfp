@@ -1,6 +1,7 @@
 package com.rfp.service.crawl
 
 import org.apache.pdfbox.Loader
+import org.apache.pdfbox.cos.COSArray
 import org.apache.pdfbox.cos.COSName
 import org.apache.pdfbox.pdmodel.PDDocument
 import org.apache.pdfbox.pdmodel.PDPage
@@ -79,6 +80,26 @@ class CatalogDocumentParserTest {
             "المواصفات",
             "مدى القياس ٦٠٠ فولت",
         )
+    }
+
+    @Test
+    fun `rejects a malformed OLE2 Word document explicitly`() {
+        val bytes = hexResourceBytes("DMM-1000-malformed-ole.hex")
+
+        assertThat(FileMagic.valueOf(ByteArrayInputStream(bytes))).isEqualTo(FileMagic.OLE2)
+        assertRejected(DocumentRejectionReason.MALFORMED) {
+            parser.parse(bytes, "application/msword", source.resolve("malformed.doc"))
+        }
+    }
+
+    @Test
+    fun `rejects a password protected Word 97-2003 document explicitly`() {
+        val bytes = resourceBytes("DMM-1000-protected.doc")
+
+        assertThat(FileMagic.valueOf(ByteArrayInputStream(bytes))).isEqualTo(FileMagic.OLE2)
+        assertRejected(DocumentRejectionReason.ENCRYPTED) {
+            parser.parse(bytes, "application/msword", source.resolve("protected.doc"))
+        }
     }
 
     @Test
@@ -189,6 +210,17 @@ class CatalogDocumentParserTest {
     }
 
     @Test
+    fun `preserves HTML mixed text around nested elements in document order`() {
+        val html = """
+            <html><body><div>before <strong>child</strong> after</div></body></html>
+        """.trimIndent().toByteArray()
+
+        val parsed = parser.parse(html, "text/html", source.resolve("mixed.html"))
+
+        assertThat(parsed.text.replace(Regex("\\s+"), " ")).isEqualTo("before child after")
+    }
+
+    @Test
     fun `uses cached displayed formula values without evaluating external workbook links`() {
         val parsed = parser.parse(
             workbookWithCachedExternalFormula(),
@@ -251,6 +283,118 @@ class CatalogDocumentParserTest {
     }
 
     @Test
+    fun `parses OOXML content type declarations using their XML encoding`() {
+        val utf16Docx = rewriteZipEntry(
+            resourceBytes("DMM-1000-manual.docx"),
+            "[Content_Types].xml",
+        ) { xml ->
+            xml.toString(Charsets.UTF_8)
+                .replace("UTF-8", "UTF-16", ignoreCase = true)
+                .toByteArray(Charsets.UTF_16)
+        }
+
+        val parsed = parser.parse(
+            utf16Docx,
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            source.resolve("utf16.docx"),
+        )
+
+        assertThat(parsed.text).contains("Accuracy 0.5%", "مدى القياس ٦٠٠ فولت")
+    }
+
+    @Test
+    fun `does not accept OOXML content types mentioned only in comments`() {
+        val spoofed = zipEntries(
+            mapOf(
+                "[Content_Types].xml" to """
+                    <?xml version="1.0" encoding="UTF-8"?>
+                    <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+                      <!-- application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml -->
+                      <Default Extension="xml" ContentType="application/xml"/>
+                    </Types>
+                """.trimIndent().toByteArray(),
+                "word/document.xml" to """
+                    <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>
+                """.trimIndent().toByteArray(),
+            ),
+        )
+
+        assertRejected(DocumentRejectionReason.UNSUPPORTED) {
+            parser.parse(
+                spoofed,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                source.resolve("spoofed.docx"),
+            )
+        }
+    }
+
+    @Test
+    fun `rejects excessive XML depth in otherwise ignored OOXML relationships`() {
+        val deeplyNestedRelationship = addZipEntry(
+            resourceBytes("DMM-1000-manual.docx"),
+            "custom/_rels/hostile.rels",
+            ("<n>".repeat(24) + "value" + "</n>".repeat(24)).toByteArray(),
+        )
+
+        assertRejected(DocumentRejectionReason.RESOURCE_LIMIT_EXCEEDED) {
+            CatalogDocumentParser(maxXmlDepth = 16).parse(
+                deeplyNestedRelationship,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                source.resolve("deep.docx"),
+            )
+        }
+    }
+
+    @Test
+    fun `rejects XML element and text budgets in otherwise ignored OOXML parts`() {
+        val manyElements = addZipEntry(
+            resourceBytes("DMM-1000-manual.docx"),
+            "custom/hostile.xml",
+            ("<root>" + "<item/>".repeat(1_000) + "</root>").toByteArray(),
+        )
+        val longText = addZipEntry(
+            resourceBytes("DMM-1000-manual.docx"),
+            "custom/hostile.xml",
+            ("<root>" + "x".repeat(2_000) + "</root>").toByteArray(),
+        )
+
+        assertRejected(DocumentRejectionReason.RESOURCE_LIMIT_EXCEEDED) {
+            CatalogDocumentParser(maxXmlElements = 200).parse(
+                manyElements,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                source.resolve("elements.docx"),
+            )
+        }
+        assertRejected(DocumentRejectionReason.RESOURCE_LIMIT_EXCEEDED) {
+            CatalogDocumentParser(maxTextCharacters = 1_000).parse(
+                longText,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                source.resolve("text.docx"),
+            )
+        }
+    }
+
+    @Test
+    fun `rejects DOCX run and table cell budgets during archive preflight`() {
+        val docx = docxWithRunsAndCells(runs = 2, cells = 2)
+
+        assertRejected(DocumentRejectionReason.RESOURCE_LIMIT_EXCEEDED) {
+            CatalogDocumentParser(maxRuns = 1).parse(
+                docx,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                source.resolve("runs.docx"),
+            )
+        }
+        assertRejected(DocumentRejectionReason.RESOURCE_LIMIT_EXCEEDED) {
+            CatalogDocumentParser(maxCells = 1).parse(
+                docx,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                source.resolve("cells.docx"),
+            )
+        }
+    }
+
+    @Test
     fun `rejects high expansion PDF streams and oversized single page text`() {
         assertRejected(DocumentRejectionReason.RESOURCE_LIMIT_EXCEEDED) {
             CatalogDocumentParser(maxExpandedBytes = 1024).parse(
@@ -266,6 +410,28 @@ class CatalogDocumentParserTest {
                 source.resolve("one-large-page.pdf"),
             )
         }
+    }
+
+    @Test
+    fun `applies PDF expansion budgets after complete filter chains`() {
+        assertRejected(DocumentRejectionReason.RESOURCE_LIMIT_EXCEEDED) {
+            CatalogDocumentParser(maxExpandedBytes = 1_024).parse(
+                chainedFilterPdf(16 * 1_024),
+                "application/pdf",
+                source.resolve("filter-chain.pdf"),
+            )
+        }
+    }
+
+    @Test
+    fun `accepts valid PDF streams containing literal stream delimiter text`() {
+        val parsed = parser.parse(
+            pdfWithLiteralStreamTokens(),
+            "application/pdf",
+            source.resolve("literal-token.pdf"),
+        )
+
+        assertThat(parsed.contentType).isEqualTo("application/pdf")
     }
 
     @Test
@@ -335,14 +501,66 @@ class CatalogDocumentParserTest {
     }
 
     @Test
-    fun `rejects parsing when the shared work deadline expires`() {
-        val clock = AdvancingNanoTimeSource(Duration.ofMillis(1))
+    fun `rejects contradictory unknown media types even when extension and magic agree`() {
+        assertRejected(DocumentRejectionReason.TYPE_MISMATCH) {
+            parser.parse(
+                resourceBytes("DMM-1000-manual.pdf"),
+                "image/png",
+                source.resolve("manual.pdf"),
+            )
+        }
+    }
 
+    @Test
+    fun `rejects binary bytes declared as HTML`() {
+        val binary = byteArrayOf(0, 1, 2, 3, 0x7f, 0, 0x80.toByte(), 0xff.toByte())
+
+        assertRejected(DocumentRejectionReason.TYPE_MISMATCH) {
+            parser.parse(binary, "text/html", source.resolve("manual.html"))
+        }
+    }
+
+    @Test
+    fun `forcibly bounds parsing with an absolute worker deadline`() {
+        val started = System.nanoTime()
         assertRejected(DocumentRejectionReason.TIME_LIMIT_EXCEEDED) {
             CatalogDocumentParser(
                 maximumDuration = Duration.ofMillis(1),
-                nanoTimeSource = clock,
-            ).parse("manual".toByteArray(), "text/plain", source.resolve("manual.txt"))
+            ).parse(
+                resourceBytes("DMM-1000-manual.docx"),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                source.resolve("deadline.docx"),
+            )
+        }
+        assertThat(Duration.ofNanos(System.nanoTime() - started)).isLessThan(Duration.ofSeconds(5))
+    }
+
+    @Test
+    fun `rejects worker output beyond the parent response bound`() {
+        assertRejected(DocumentRejectionReason.RESOURCE_LIMIT_EXCEEDED) {
+            CatalogDocumentParser(maxWorkerOutputBytes = 128).parse(
+                "x".repeat(1_000).toByteArray(),
+                "text/plain",
+                source.resolve("output.txt"),
+            )
+        }
+    }
+
+    @Test
+    fun `contains parser heap exhaustion inside the worker process`() {
+        assertRejected(DocumentRejectionReason.RESOURCE_LIMIT_EXCEEDED) {
+            CatalogDocumentParser(
+                maxDocumentBytes = 2 * 1024 * 1024,
+                maxExpandedBytes = 64L * 1024 * 1024,
+                maxArchiveEntryBytes = 64L * 1024 * 1024,
+                maxTextCharacters = 64L * 1024 * 1024,
+                maxWorkerOutputBytes = 64L * 1024 * 1024,
+                workerMaxHeapMegabytes = 16,
+            ).parse(
+                docxWithLargeText(24 * 1024 * 1024),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                source.resolve("heap.docx"),
+            )
         }
     }
 
@@ -428,6 +646,50 @@ class CatalogDocumentParserTest {
         return output.toByteArray()
     }
 
+    private fun rewriteZipEntry(bytes: ByteArray, name: String, transform: (ByteArray) -> ByteArray): ByteArray {
+        val output = ByteArrayOutputStream()
+        ZipInputStream(ByteArrayInputStream(bytes)).use { input ->
+            ZipOutputStream(output).use { zip ->
+                generateSequence(input::getNextEntry).forEach { entry ->
+                    zip.putNextEntry(ZipEntry(entry.name))
+                    val content = input.readAllBytes()
+                    zip.write(if (entry.name == name) transform(content) else content)
+                    zip.closeEntry()
+                }
+            }
+        }
+        return output.toByteArray()
+    }
+
+    private fun addZipEntry(bytes: ByteArray, name: String, content: ByteArray): ByteArray {
+        val output = ByteArrayOutputStream()
+        ZipInputStream(ByteArrayInputStream(bytes)).use { input ->
+            ZipOutputStream(output).use { zip ->
+                generateSequence(input::getNextEntry).forEach { entry ->
+                    zip.putNextEntry(ZipEntry(entry.name))
+                    zip.write(input.readAllBytes())
+                    zip.closeEntry()
+                }
+                zip.putNextEntry(ZipEntry(name))
+                zip.write(content)
+                zip.closeEntry()
+            }
+        }
+        return output.toByteArray()
+    }
+
+    private fun zipEntries(entries: Map<String, ByteArray>): ByteArray {
+        val output = ByteArrayOutputStream()
+        ZipOutputStream(output).use { zip ->
+            entries.forEach { (name, content) ->
+                zip.putNextEntry(ZipEntry(name))
+                zip.write(content)
+                zip.closeEntry()
+            }
+        }
+        return output.toByteArray()
+    }
+
     private fun highExpansionPdf(characters: Int): ByteArray {
         val document = PDDocument()
         return document.use {
@@ -435,6 +697,32 @@ class CatalogDocumentParserTest {
             it.addPage(page)
             val decoded = "%" + "x".repeat(characters)
             page.setContents(PDStream(it, ByteArrayInputStream(decoded.toByteArray()), COSName.FLATE_DECODE))
+            ByteArrayOutputStream().also(it::save).toByteArray()
+        }
+    }
+
+    private fun chainedFilterPdf(characters: Int): ByteArray {
+        val document = PDDocument()
+        return document.use {
+            val page = PDPage()
+            it.addPage(page)
+            val filters = COSArray().apply {
+                add(COSName.ASCII85_DECODE)
+                add(COSName.FLATE_DECODE)
+            }
+            val decoded = "%" + "x".repeat(characters)
+            page.setContents(PDStream(it, ByteArrayInputStream(decoded.toByteArray()), filters))
+            ByteArrayOutputStream().also(it::save).toByteArray()
+        }
+    }
+
+    private fun pdfWithLiteralStreamTokens(): ByteArray {
+        val document = PDDocument()
+        return document.use {
+            val page = PDPage()
+            it.addPage(page)
+            val custom = PDStream(it, ByteArrayInputStream("prefix endstream stream suffix".toByteArray()))
+            page.cosObject.setItem(COSName.getPDFName("CustomData"), custom.cosObject)
             ByteArrayOutputStream().also(it::save).toByteArray()
         }
     }
@@ -473,12 +761,36 @@ class CatalogDocumentParserTest {
         ByteArrayOutputStream().also(doc::write).toByteArray()
     }
 
+    private fun docxWithRunsAndCells(runs: Int, cells: Int): ByteArray = XWPFDocument().use { doc ->
+        val paragraph = doc.createParagraph()
+        repeat(runs) { paragraph.createRun().setText("run-$it") }
+        if (cells > 0) {
+            val table = doc.createTable(1, cells)
+            repeat(cells) { table.getRow(0).getCell(it).text = "cell-$it" }
+        }
+        ByteArrayOutputStream().also(doc::write).toByteArray()
+    }
+
     private fun resourceBytes(name: String): ByteArray = checkNotNull(javaClass.getResourceAsStream("/crawl/$name")) {
         "missing fixture $name"
     }.use { it.readAllBytes() }
 
-    private class AdvancingNanoTimeSource(private val step: Duration) : NanoTimeSource {
-        private var now = 0L
-        override fun nanoTime(): Long = now.also { now += step.toNanos() }
+    private fun hexResourceBytes(name: String): ByteArray = resourceBytes(name)
+        .toString(Charsets.US_ASCII)
+        .trim()
+        .split(Regex("\\s+"))
+        .map { it.toInt(16).toByte() }
+        .toByteArray()
+
+    private fun docxWithLargeText(characters: Int): ByteArray = rewriteZipEntry(
+        resourceBytes("DMM-1000-manual.docx"),
+        "word/document.xml",
+    ) {
+        """
+            <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+            <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:body><w:p><w:r><w:t>${"x".repeat(characters)}</w:t></w:r></w:p></w:body>
+            </w:document>
+        """.trimIndent().toByteArray()
     }
 }

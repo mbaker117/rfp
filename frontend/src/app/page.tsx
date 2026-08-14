@@ -152,6 +152,7 @@ export default function Home() {
                 </div>
               ) : (
                 <div
+                  data-testid="catalog-drop-zone"
                   className="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center cursor-pointer hover:border-blue-400 transition-colors"
                   onClick={() => !catalogLoading && catalogInputRef.current?.click()}
                   onDragOver={e => e.preventDefault()}

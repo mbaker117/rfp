@@ -41,8 +41,7 @@ describe('Home page — Step 2 catalog drop zone', () => {
   it('shows the catalog drop zone by default', () => {
     render(<Home />);
     expect(screen.getByText(/upload supplier catalog/i)).toBeInTheDocument();
-    const catalogDropZones = screen.getAllByText(/drop pdf, word, or excel/i);
-    expect(catalogDropZones.length).toBeGreaterThan(0);
+    expect(screen.getByTestId('catalog-drop-zone')).toBeInTheDocument();
   });
 
   it('shows disclosure toggle for existing suppliers', () => {
@@ -59,9 +58,7 @@ describe('Home page — Step 2 catalog drop zone', () => {
   it('calls registerSupplier and uploadCatalog when a file is dropped', async () => {
     const { api } = require('../lib/api');
     render(<Home />);
-    // Get Step 2 specifically
-    const catalogSection = screen.getByText(/upload supplier catalog/i).closest('div')!;
-    const dropZone = catalogSection.querySelector('div.border-2')!;
+    const dropZone = screen.getByTestId('catalog-drop-zone');
     const file = new File(['content'], 'my-catalog.pdf', { type: 'application/pdf' });
     fireEvent.drop(dropZone, { dataTransfer: { files: [file] } });
 
@@ -73,9 +70,7 @@ describe('Home page — Step 2 catalog drop zone', () => {
 
   it('shows confirmation chip after successful catalog upload', async () => {
     render(<Home />);
-    // Get Step 2 specifically
-    const catalogSection = screen.getByText(/upload supplier catalog/i).closest('div')!;
-    const dropZone = catalogSection.querySelector('div.border-2')!;
+    const dropZone = screen.getByTestId('catalog-drop-zone');
     const file = new File(['content'], 'my-catalog.pdf', { type: 'application/pdf' });
     fireEvent.drop(dropZone, { dataTransfer: { files: [file] } });
 
@@ -86,9 +81,7 @@ describe('Home page — Step 2 catalog drop zone', () => {
 
   it('removes catalog supplier when chip ✕ is clicked', async () => {
     render(<Home />);
-    // Get Step 2 specifically
-    const catalogSection = screen.getByText(/upload supplier catalog/i).closest('div')!;
-    const dropZone = catalogSection.querySelector('div.border-2')!;
+    const dropZone = screen.getByTestId('catalog-drop-zone');
     const file = new File(['content'], 'my-catalog.pdf', { type: 'application/pdf' });
     fireEvent.drop(dropZone, { dataTransfer: { files: [file] } });
 
@@ -96,7 +89,7 @@ describe('Home page — Step 2 catalog drop zone', () => {
     fireEvent.click(screen.getByLabelText('Remove catalog'));
     expect(screen.queryByText('my-catalog.pdf')).not.toBeInTheDocument();
     // After removal, the drop zone should be back
-    expect(catalogSection.querySelector('div.border-2')).toBeInTheDocument();
+    expect(screen.getByTestId('catalog-drop-zone')).toBeInTheDocument();
   });
 
   it('enables Analyze button when catalog file is uploaded and RFP is selected', async () => {

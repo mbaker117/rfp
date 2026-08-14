@@ -36,8 +36,20 @@ jest.mock('../components/SupplierCombobox', () => ({
     </button>
   ),
 }));
+jest.mock('../components/FileUpload', () => ({
+  FileUpload: ({ onFile }: { onFile: (f: File) => void }) => (
+    <button
+      data-testid="file-upload-btn"
+      onClick={() => onFile(new File(['rfp'], 'rfp.pdf', { type: 'application/pdf' }))}
+    >
+      Upload RFP
+    </button>
+  ),
+}));
 
 describe('Home page — Step 2 catalog drop zone', () => {
+  beforeEach(() => jest.clearAllMocks());
+
   it('shows the catalog drop zone by default', () => {
     render(<Home />);
     expect(screen.getByText(/upload supplier catalog/i)).toBeInTheDocument();
@@ -93,11 +105,27 @@ describe('Home page — Step 2 catalog drop zone', () => {
   });
 
   it('enables Analyze button when catalog file is uploaded and RFP is selected', async () => {
-    const { FileUpload } = require('../components/FileUpload');
     render(<Home />);
 
-    // Simulate RFP upload via FileUpload mock call
-    // The Analyze button should be disabled initially
+    // Initially, Analyze button should be disabled
     expect(screen.getByRole('button', { name: /analyze rfp/i })).toBeDisabled();
+
+    // Step 1: Drop a catalog file
+    const dropZone = screen.getByTestId('catalog-drop-zone');
+    const catalogFile = new File(['content'], 'my-catalog.pdf', { type: 'application/pdf' });
+    fireEvent.drop(dropZone, { dataTransfer: { files: [catalogFile] } });
+
+    // Wait for catalog upload to complete
+    await waitFor(() => {
+      expect(screen.getByText('my-catalog.pdf')).toBeInTheDocument();
+    });
+
+    // Step 2: Click the FileUpload button to set the RFP file
+    fireEvent.click(screen.getByTestId('file-upload-btn'));
+
+    // Step 3: Verify the Analyze button is now enabled
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /analyze rfp/i })).not.toBeDisabled();
+    });
   });
 });

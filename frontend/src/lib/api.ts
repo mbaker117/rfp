@@ -1,4 +1,4 @@
-import type { Supplier, RfpReport, AdminUser, AdminProduct, AdminTender, PageResult, IngestRecord } from './types';
+import type { Supplier, RfpReport, AdminUser, AdminProduct, AdminTender, PageResult, IngestRecord, SelectedProduct, ProposalAlternative, ProposalLine, Proposal, ProductSearchResult } from './types';
 
 const BASE = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080';
 
@@ -96,6 +96,42 @@ export const api = {
       headers: authHeaders(token),
     });
     return json<RfpReport>(res);
+  },
+
+  proposals: {
+    async generate(rfpId: number, token: string): Promise<{ status: string }> {
+      const res = await fetch(`${BASE}/rfp/${rfpId}/proposals`, {
+        method: 'POST',
+        headers: authHeaders(token),
+      });
+      return json<{ status: string }>(res);
+    },
+    async list(rfpId: number, token: string): Promise<Proposal[]> {
+      const res = await fetch(`${BASE}/rfp/${rfpId}/proposals`, {
+        headers: authHeaders(token),
+      });
+      return json<Proposal[]>(res);
+    },
+    async override(
+      rfpId: number, proposalId: number, lineId: number, productId: number, token: string
+    ): Promise<{ status: string }> {
+      const res = await fetch(`${BASE}/rfp/${rfpId}/proposals/${proposalId}/lines/${lineId}`, {
+        method: 'PATCH',
+        headers: authHeaders(token),
+        body: JSON.stringify({ productId }),
+      });
+      return json<{ status: string }>(res);
+    },
+    async search(
+      rfpId: number, proposalId: number, lineId: number, q: string, token: string
+    ): Promise<ProductSearchResult[]> {
+      const params = new URLSearchParams({ q });
+      const res = await fetch(
+        `${BASE}/rfp/${rfpId}/proposals/${proposalId}/lines/${lineId}/search?${params}`,
+        { headers: authHeaders(token) }
+      );
+      return json<ProductSearchResult[]>(res);
+    },
   },
 
   admin: {

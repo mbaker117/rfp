@@ -93,3 +93,57 @@ export interface PageResult<T> {
   content: T[];
   totalElements: number;
 }
+
+export interface SelectedProduct {
+  id: number;
+  name: string;
+  mpn: string | null;
+  price: number | null;
+  currency: string;
+  supplierName: string;
+  description: string | null;
+  manualLink: string | null;
+}
+
+export interface ProposalAlternative {
+  productId: number;
+  name: string;
+  mpn: string | null;
+  score: number;
+  price: number | null;
+  currency: string;
+  description: string | null;
+  supplierName: string;
+}
+
+export interface ProposalLine {
+  lineId: number;
+  description: string | null;
+  qty: number | null;
+  matchScore: number | null;
+  selectedProduct: SelectedProduct | null;
+  acceptanceProbability: number | null;
+  llmReasoning: string | null;
+  isOverridden: boolean;
+  alternatives: ProposalAlternative[];
+}
+
+export interface Proposal {
+  id: number;
+  variant: 'PERFECT' | 'BEST_ACCEPTANCE' | 'CHEAPEST';
+  status: 'GENERATING' | 'READY' | 'FAILED';
+  acceptanceRate: number | null;
+  matchScore: number | null;
+  isComplete: boolean;
+  lines: ProposalLine[];
+}
+
+export interface ProductSearchResult {
+  productId: number;
+  name: string;
+  mpn: string | null;
+  score: number;
+  price: number | null;
+  currency: string;
+  supplierName: string;
+}

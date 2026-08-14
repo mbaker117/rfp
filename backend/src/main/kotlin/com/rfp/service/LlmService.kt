@@ -9,6 +9,8 @@ import java.security.MessageDigest
 
 class LlmException(message: String) : RuntimeException(message)
 
+data class AcceptanceEstimate(val probability: Int, val reasoning: String)
+
 @Service
 class LlmService(private val llmClient: LlmClient) {
 
@@ -188,6 +190,45 @@ class LlmService(private val llmClient: LlmClient) {
                 attributes = mapper.readValue(l["attributes"].toString())
             )
         }
+    }
+
+    // Task 4: estimate procurement acceptance probability for a matched product
+    fun estimateAcceptance(
+        lineDescription: String,
+        lineAttrs: Map<String, Any>,
+        productName: String,
+        productMpn: String?,
+        productAttrs: Map<String, Any>,
+        verdictsStr: String,
+        price: java.math.BigDecimal?,
+        currency: String
+    ): AcceptanceEstimate {
+        val system = """
+            You are a procurement analyst. Estimate the probability (0–100) that a
+            procurement reviewer would accept the offered product as fulfilling the
+            stated requirement. Consider: technical compliance (attribute verdicts),
+            price competitiveness, brand reputation and market acceptance, and whether
+            this is a reasonable substitution. Return ONLY valid JSON:
+            {"probability": <integer 0-100>, "reasoning": "<one sentence>"}
+        """.trimIndent()
+        val priceStr = if (price != null) "$price $currency" else "not available"
+        val lineAttrsStr = lineAttrs.entries.joinToString(", ") { "${it.key}: ${it.value}" }
+        val productAttrsStr = productAttrs.entries
+            .filter { it.key !in setOf("description", "manualLink") }
+            .joinToString(", ") { "${it.key}: ${it.value}" }
+        val user = """
+            Requirement: $lineDescription
+            Required attributes: $lineAttrsStr
+            Offered product: $productName${if (productMpn != null) " ($productMpn)" else ""}
+            Offered attributes: $productAttrsStr
+            Attribute verdicts: $verdictsStr
+            Price: $priceStr
+        """.trimIndent()
+        val json = parseJson(call(system, user))
+        return AcceptanceEstimate(
+            probability = json["probability"]?.asInt() ?: 0,
+            reasoning = json["reasoning"]?.asText() ?: ""
+        )
     }
 
     private fun sha256(input: String): String =

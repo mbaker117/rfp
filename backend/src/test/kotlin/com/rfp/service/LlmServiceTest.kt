@@ -58,4 +58,25 @@ class LlmServiceTest {
         assertThat(result[0].description).isEqualTo("True RMS multimeter 1000V")
         assertThat(result[0].qty?.toInt()).isEqualTo(5)
     }
+
+    @Test
+    fun `estimateAcceptance parses probability and reasoning`() {
+        val llmClient = mockk<LlmClient>()
+        val service = LlmService(llmClient)
+        every { llmClient.call(any(), any()) } returns """{"probability": 82, "reasoning": "Good spec compliance and competitive price."}"""
+
+        val result = service.estimateAcceptance(
+            lineDescription = "True RMS multimeter 1000V",
+            lineAttrs = mapOf("max_voltage" to 1000.0),
+            productName = "Fluke 179",
+            productMpn = "FL179",
+            productAttrs = mapOf("max_voltage" to 1000.0, "has_trms" to true),
+            verdictsStr = "max_voltage: COMPLIANT",
+            price = java.math.BigDecimal("320.00"),
+            currency = "JOD"
+        )
+
+        assertThat(result.probability).isEqualTo(82)
+        assertThat(result.reasoning).isEqualTo("Good spec compliance and competitive price.")
+    }
 }

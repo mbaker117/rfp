@@ -1,6 +1,9 @@
 package com.rfp.service
 
+import com.rfp.domain.Product
 import com.rfp.repository.MatchResultRepository
+import com.rfp.repository.ProposalLineRepository
+import com.rfp.repository.ProposalRepository
 import com.rfp.repository.TenderLineRepository
 import com.rfp.repository.TenderRepository
 import org.apache.pdfbox.pdmodel.PDDocument
@@ -17,10 +20,16 @@ import java.io.ByteArrayOutputStream
 class ReportService(
     private val tenderRepo: TenderRepository,
     private val tenderLineRepo: TenderLineRepository,
-    private val matchResultRepo: MatchResultRepository
+    private val matchResultRepo: MatchResultRepository,
+    private val proposalRepo: ProposalRepository,
+    private val proposalLineRepo: ProposalLineRepository
 ) {
-    fun exportXlsx(tenderId: Long): ByteArray {
+    fun exportXlsx(tenderId: Long, proposalId: Long? = null): ByteArray {
         tenderRepo.findById(tenderId).orElseThrow { NoSuchElementException("Tender $tenderId not found") }
+        val proposalProductMap: Map<Long, Product?> = if (proposalId != null) {
+            proposalLineRepo.findByProposalId(proposalId)
+                .associate { it.line.id to it.selectedProduct }
+        } else emptyMap()
         val results = matchResultRepo.findByLineTenderId(tenderId)
         XSSFWorkbook().use { wb ->
             val sheet = wb.createSheet("Report")
@@ -29,12 +38,13 @@ class ReportService(
                 "Match Type", "Score", "Status", "Price", "Currency", "Alternatives Count")
                 .forEachIndexed { i, h -> header.createCell(i).setCellValue(h) }
             results.forEachIndexed { idx, r ->
+                val product = if (proposalId != null) proposalProductMap[r.line.id] else r.product
                 val row = sheet.createRow(idx + 1)
                 row.createCell(0).setCellValue(r.line.lineNo ?: (idx + 1).toString())
                 row.createCell(1).setCellValue(r.line.description ?: r.line.rawText)
                 row.createCell(2).setCellValue(r.line.qty?.toDouble() ?: 0.0)
-                row.createCell(3).setCellValue(r.product?.name ?: "")
-                row.createCell(4).setCellValue(r.product?.mpn ?: "")
+                row.createCell(3).setCellValue(product?.name ?: "")
+                row.createCell(4).setCellValue(product?.mpn ?: "")
                 row.createCell(5).setCellValue(r.matchType ?: "")
                 row.createCell(6).setCellValue(r.score.toDouble())
                 row.createCell(7).setCellValue(r.status)
@@ -48,8 +58,12 @@ class ReportService(
         }
     }
 
-    fun exportPdf(tenderId: Long): ByteArray {
+    fun exportPdf(tenderId: Long, proposalId: Long? = null): ByteArray {
         tenderRepo.findById(tenderId).orElseThrow { NoSuchElementException("Tender $tenderId not found") }
+        val proposalProductMap: Map<Long, Product?> = if (proposalId != null) {
+            proposalLineRepo.findByProposalId(proposalId)
+                .associate { it.line.id to it.selectedProduct }
+        } else emptyMap()
         val results = matchResultRepo.findByLineTenderId(tenderId)
         val doc = PDDocument()
         try {
@@ -73,10 +87,11 @@ class ReportService(
                     stream.close(); page = PDPage(); doc.addPage(page)
                     stream = PDPageContentStream(doc, page); y = 750f
                 }
+                val product = if (proposalId != null) proposalProductMap[r.line.id] else r.product
                 stream.beginText(); stream.setFont(arabicFont, 9f)
                 stream.newLineAtOffset(50f, y)
                 val desc = (r.line.description ?: r.line.rawText).take(40).padEnd(40)
-                val matched = (r.product?.name ?: "NOT FOUND").take(30).padEnd(30)
+                val matched = (product?.name ?: "NOT FOUND").take(30).padEnd(30)
                 stream.showText("$desc | $matched | ${r.score}/100 | ${r.status}")
                 stream.endText(); y -= 18f
             }

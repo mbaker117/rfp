@@ -2,6 +2,8 @@ package com.rfp.service
 
 import com.rfp.domain.*
 import com.rfp.repository.MatchResultRepository
+import com.rfp.repository.ProposalLineRepository
+import com.rfp.repository.ProposalRepository
 import com.rfp.repository.TenderLineRepository
 import com.rfp.repository.TenderRepository
 import io.mockk.every
@@ -19,7 +21,9 @@ class ReportServiceTest {
     private val tenderRepo = mockk<TenderRepository>()
     private val tenderLineRepo = mockk<TenderLineRepository>()
     private val matchResultRepo = mockk<MatchResultRepository>()
-    private val service = ReportService(tenderRepo, tenderLineRepo, matchResultRepo)
+    private val proposalRepo = mockk<ProposalRepository>()
+    private val proposalLineRepo = mockk<ProposalLineRepository>()
+    private val service = ReportService(tenderRepo, tenderLineRepo, matchResultRepo, proposalRepo, proposalLineRepo)
 
     private val supplier = Supplier(id = 1, name = "Acme Corp", country = "Jordan")
     private val tender = Tender(id = 1L, userId = 1L, filename = "test.pdf", fileType = "pdf", status = "done")
@@ -94,6 +98,34 @@ class ReportServiceTest {
         every { tenderRepo.findById(99L) } returns Optional.empty()
         val ex = assertThrows<NoSuchElementException> { service.exportXlsx(99L) }
         assertTrue(ex.message?.contains("99") == true)
+    }
+
+    @Test
+    fun `exportXlsx with proposalId uses proposal selected products`() {
+        val proposalId = 10L
+        val line = makeLine(1L, "Digital Oscilloscope 200MHz")
+        val result = makeResult(line, "Oscilloscope 200MHz", 95)
+        val selectedProduct = Product(id = 2L, supplier = supplier, name = "Proposal Product", source = "scrape")
+        val proposal = Proposal(id = proposalId, tender = tender, variant = "A")
+        val proposalLine = ProposalLine(
+            id = 1L,
+            proposal = proposal,
+            line = line,
+            selectedProduct = selectedProduct
+        )
+        every { tenderRepo.findById(1L) } returns Optional.of(tender)
+        every { proposalLineRepo.findByProposalId(proposalId) } returns listOf(proposalLine)
+        every { matchResultRepo.findByLineTenderId(1L) } returns listOf(result)
+
+        val bytes = service.exportXlsx(tenderId = 1L, proposalId = proposalId)
+        assertNotNull(bytes)
+        assertTrue(bytes.isNotEmpty())
+
+        val wb = XSSFWorkbook(ByteArrayInputStream(bytes))
+        val sheet = wb.getSheetAt(0)
+        val dataRow = sheet.getRow(1)
+        assertEquals("Proposal Product", dataRow.getCell(3).stringCellValue)
+        wb.close()
     }
 
     @Test

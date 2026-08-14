@@ -68,16 +68,20 @@ class RfpController(
     }
 
     @GetMapping("/{id}/report/export")
-    fun export(@PathVariable id: Long, @RequestParam format: String): ResponseEntity<ByteArray> =
+    fun export(
+        @PathVariable id: Long,
+        @RequestParam format: String,
+        @RequestParam(required = false) proposalId: Long?
+    ): ResponseEntity<ByteArray> =
         when (format.lowercase()) {
             "xlsx" -> ResponseEntity.ok()
                 .header("Content-Disposition", "attachment; filename=report-$id.xlsx")
                 .header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-                .body(reportService.exportXlsx(id))
+                .body(reportService.exportXlsx(id, proposalId))
             "pdf" -> ResponseEntity.ok()
                 .header("Content-Disposition", "attachment; filename=report-$id.pdf")
                 .header("Content-Type", "application/pdf")
-                .body(reportService.exportPdf(id))
+                .body(reportService.exportPdf(id, proposalId))
             else -> ResponseEntity.badRequest().build()
         }
 }

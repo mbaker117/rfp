@@ -3,6 +3,8 @@ package com.rfp.controller
 import com.ninjasquad.springmockk.MockkBean
 import com.rfp.domain.*
 import com.rfp.repository.MatchResultRepository
+import com.rfp.repository.ProposalLineRepository
+import com.rfp.repository.ProposalRepository
 import com.rfp.repository.TenderLineRepository
 import com.rfp.repository.TenderRepository
 import com.rfp.security.JwtUtil
@@ -33,6 +35,8 @@ class RfpControllerTest {
     @MockkBean lateinit var extractionService: TenderExtractionService
     @MockkBean lateinit var matchingService: MatchingEngineService
     @MockkBean lateinit var reportService: ReportService
+    @MockkBean lateinit var proposalRepo: ProposalRepository
+    @MockkBean lateinit var proposalLineRepo: ProposalLineRepository
     @MockkBean lateinit var jwtUtil: JwtUtil
 
     private val tender = Tender(id = 1L, userId = 1L, filename = "test.pdf", fileType = "pdf", status = "done")
@@ -74,7 +78,7 @@ class RfpControllerTest {
     @WithMockUser
     fun `GET report export xlsx returns attachment`() {
         val xlsxBytes = byteArrayOf(0x50, 0x4B, 0x03, 0x04)
-        every { reportService.exportXlsx(1L) } returns xlsxBytes
+        every { reportService.exportXlsx(1L, null) } returns xlsxBytes
 
         mvc.perform(get("/rfp/1/report/export").param("format", "xlsx"))
             .andExpect(status().isOk)
@@ -86,7 +90,7 @@ class RfpControllerTest {
     @WithMockUser
     fun `GET report export pdf returns attachment`() {
         val pdfBytes = byteArrayOf(0x25, 0x50, 0x44, 0x46)
-        every { reportService.exportPdf(1L) } returns pdfBytes
+        every { reportService.exportPdf(1L, null) } returns pdfBytes
 
         mvc.perform(get("/rfp/1/report/export").param("format", "pdf"))
             .andExpect(status().isOk)

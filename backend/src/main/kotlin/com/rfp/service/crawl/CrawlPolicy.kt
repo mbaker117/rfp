@@ -118,6 +118,7 @@ class CrawlPolicy(
     }
 
     private fun isPublicIpv6(bytes: List<Int>): Boolean {
+        if ((bytes[0] and 0xe0) != 0x20) return false
         if (hasPrefix(bytes, intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff), 96)) return false
         if (hasPrefix(bytes, intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 0, 0), 96)) return false
         if (bytes.take(12).all { it == 0 }) return false

@@ -214,6 +214,25 @@ class CrawlPolicyTest {
     }
 
     @Test
+    fun `rejects IPv6 outside globally allocated unicast space`() {
+        val answers = listOf(
+            InetAddress.getByName("4000::1"),
+            InetAddress.getByName("6000::1"),
+            InetAddress.getByName("8000::1"),
+            InetAddress.getByName("c000::1"),
+            InetAddress.getByName("fe00::1"),
+        )
+
+        val decisions = answers.mapIndexed { index, answer ->
+            val host = "unallocated$index.example.com"
+            resolver.answers[host] = listOf(answer)
+            policy.validate(URI("https://$host/catalog"), URI("https://example.com"), emptySet())
+        }
+
+        assertThat(decisions).containsOnly(PolicyDecision.Rejected(PolicyRejection.NON_PUBLIC_ADDRESS))
+    }
+
+    @Test
     fun `Unicode explicit host cannot authorize legacy ASCII mapping collision`() {
         resolver.answers["fass.de"] = listOf(InetAddress.getByName("8.8.8.8"))
 

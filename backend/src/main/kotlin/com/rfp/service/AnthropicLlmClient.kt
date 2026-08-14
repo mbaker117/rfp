@@ -20,6 +20,8 @@ class AnthropicLlmClient(
     private val client = OkHttpClient()
     private val mapper = ObjectMapper()
 
+    private val effectiveBaseUrl = baseUrl.ifBlank { "https://api.anthropic.com/v1/" }
+
     override fun call(systemPrompt: String, userMessage: String): String {
         val body = mapper.writeValueAsString(mapOf(
             "model" to model,
@@ -29,7 +31,7 @@ class AnthropicLlmClient(
             "messages" to listOf(mapOf("role" to "user", "content" to userMessage))
         ))
         val request = Request.Builder()
-            .url("${baseUrl}messages")
+            .url("${effectiveBaseUrl}messages")
             .post(body.toRequestBody("application/json".toMediaType()))
             .header("x-api-key", apiKey)
             .header("anthropic-version", "2023-06-01")

@@ -50,8 +50,15 @@ class SupplierController(
 
     @PostMapping
     fun register(@RequestBody req: SupplierRequest): ResponseEntity<SupplierResponse> {
+        val existing = repo.findByNameIgnoreCase(req.name.trim())
+        if (existing != null) {
+            val updated = if (req.officialWebsite != null && existing.officialWebsite == null)
+                repo.save(existing.copy(officialWebsite = req.officialWebsite))
+            else existing
+            return ResponseEntity.ok(updated.toResponse())
+        }
         val saved = repo.save(Supplier(
-            name = req.name,
+            name = req.name.trim(),
             officialWebsite = req.officialWebsite,
             contactEmail = req.contactEmail,
             contactPhone = req.contactPhone,

@@ -39,6 +39,7 @@ data class CrawlFetchRequest(
     val userAgent: String = "rfp-crawler",
     val maxResponseBytes: Long = 5 * 1024 * 1024,
     val maxRedirects: Int = 5,
+    val maximumDuration: Duration = Duration.ofSeconds(20),
     val previous: StoredFetchContent? = null,
 ) {
     val scope: CrawlScope get() = CrawlScope(supplierRoot, explicitHosts)
@@ -69,24 +70,32 @@ class CrawlFetcher(
     private val canonicalizer: UrlCanonicalizer,
     private val robotsPolicy: RobotsPolicyService,
     callTimeout: Duration = Duration.ofSeconds(20),
+    private val nanoTimeSource: NanoTimeSource = SystemNanoTimeSource,
 ) {
     private val transport = ValidatedHttpTransport(client, crawlPolicy, callTimeout)
 
     fun fetch(request: CrawlFetchRequest): FetchResult {
-        if (request.maxResponseBytes <= 0 || request.maxRedirects < 0) {
+        if (
+            request.maxResponseBytes <= 0 ||
+            request.maxRedirects < 0 ||
+            request.maximumDuration.isNegative ||
+            request.maximumDuration.isZero
+        ) {
             return FetchResult.Rejected(FetchError.HTTP_FAILURE)
         }
+        val deadline = DeadlineBudget.start(request.maximumDuration, nanoTimeSource)
 
         var current = canonicalizer.resolveAndNormalize(request.url, request.url.toString())
             ?: return FetchResult.Rejected(FetchError.POLICY_REJECTED)
         val visited = mutableSetOf<URI>()
         var redirects = 0
         while (true) {
+            if (deadline.isExpired()) return timeoutRejection()
             if (!visited.add(current)) return FetchResult.Rejected(FetchError.TOO_MANY_REDIRECTS)
-            if (crawlPolicy.validate(current, request.supplierRoot, request.explicitHosts) !is PolicyDecision.Allowed) {
-                return FetchResult.Rejected(FetchError.POLICY_REJECTED)
+            transport.validateDestination(current, request.scope, deadline)?.let {
+                return it.error.toFetchRejection()
             }
-            when (val robotsDecision = robotsPolicy.canFetch(current, request.userAgent, request.scope)) {
+            when (val robotsDecision = robotsPolicy.canFetch(current, request.userAgent, request.scope, deadline)) {
                 RobotsDecision.Allowed -> Unit
                 RobotsDecision.Disallowed -> return FetchResult.Rejected(FetchError.ROBOTS_DISALLOWED)
                 is RobotsDecision.Unavailable -> return FetchResult.Rejected(
@@ -95,6 +104,7 @@ class CrawlFetcher(
                     retryAfter = robotsDecision.retryAfter,
                 )
             }
+            if (deadline.isExpired()) return timeoutRejection()
 
             val sameStoredIdentity = request.previous?.effectiveUrl == current
             val headers = buildMap {
@@ -104,7 +114,14 @@ class CrawlFetcher(
                 }
             }
             when (val response = transport.execute(
-                TransportRequest(current, request.scope, request.userAgent, request.maxResponseBytes, headers),
+                TransportRequest(
+                    current,
+                    request.scope,
+                    request.userAgent,
+                    request.maxResponseBytes,
+                    headers,
+                    deadline,
+                ),
             )) {
                 is TransportResult.Failure -> return response.error.toFetchRejection()
                 is TransportResult.Success -> {
@@ -120,7 +137,7 @@ class CrawlFetcher(
                         continue
                     }
                     if (response.status == 304) {
-                        return reuseStored(current, response, request.previous, request.maxResponseBytes)
+                        return reuseStored(current, response, request.previous, request.maxResponseBytes, deadline)
                     }
                     if (response.status !in 200..299) {
                         val retryable = response.status == 408 || response.status == 429 || response.status in 500..599
@@ -135,6 +152,8 @@ class CrawlFetcher(
                     if (!isAcceptedCrawlContentType(contentType)) {
                         return FetchResult.Rejected(FetchError.UNSUPPORTED_CONTENT_TYPE)
                     }
+                    val contentHash = sha256(response.body)
+                    if (deadline.isExpired()) return timeoutRejection()
                     return FetchResult.Success(
                         url = current,
                         status = response.status,
@@ -143,7 +162,7 @@ class CrawlFetcher(
                         etag = response.header("ETag"),
                         lastModified = response.header("Last-Modified"),
                         method = FetchMethod.HTTP,
-                        contentHash = sha256(response.body),
+                        contentHash = contentHash,
                     )
                 }
             }
@@ -155,7 +174,9 @@ class CrawlFetcher(
         response: TransportResult.Success,
         previous: StoredFetchContent?,
         maxResponseBytes: Long,
+        deadline: DeadlineBudget,
     ): FetchResult {
+        if (deadline.isExpired()) return timeoutRejection()
         if (previous == null || previous.effectiveUrl != uri) {
             return FetchResult.Rejected(FetchError.HTTP_FAILURE)
         }
@@ -167,6 +188,7 @@ class CrawlFetcher(
         if (!isAcceptedCrawlContentType(contentType)) {
             return FetchResult.Rejected(FetchError.UNSUPPORTED_CONTENT_TYPE)
         }
+        if (deadline.isExpired()) return timeoutRejection()
         return FetchResult.Success(
             url = uri,
             status = response.status,
@@ -183,6 +205,8 @@ class CrawlFetcher(
         private val REDIRECT_STATUSES = setOf(300, 301, 302, 303, 307, 308)
     }
 }
+
+private fun timeoutRejection() = FetchResult.Rejected(FetchError.TIMEOUT, retryable = true)
 
 internal fun isAcceptedCrawlContentType(contentType: String): Boolean {
     val type = normalizedContentType(contentType) ?: return false

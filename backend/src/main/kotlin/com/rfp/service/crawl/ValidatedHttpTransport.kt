@@ -10,6 +10,11 @@ import java.net.Proxy
 import java.net.URI
 import java.time.Duration
 import java.util.Locale
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.SynchronousQueue
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeoutException
 import java.util.concurrent.TimeUnit
 
 data class CrawlScope(
@@ -23,6 +28,7 @@ data class TransportRequest(
     val userAgent: String,
     val maxResponseBytes: Long,
     val headers: Map<String, String> = emptyMap(),
+    val deadline: DeadlineBudget? = null,
 )
 
 enum class TransportError {
@@ -58,13 +64,10 @@ class ValidatedHttpTransport(
 
     fun execute(request: TransportRequest): TransportResult {
         if (request.maxResponseBytes <= 0) return TransportResult.Failure(TransportError.RESPONSE_TOO_LARGE)
-        val decision = destinationValidator.validate(
-            request.uri,
-            request.scope.supplierRoot,
-            request.scope.explicitHosts,
-        )
-        if (decision !is PolicyDecision.Allowed) {
-            return TransportResult.Failure(TransportError.POLICY_REJECTED)
+        val deadline = request.deadline ?: DeadlineBudget.start(callTimeout)
+        val decision = when (val validation = validate(request.uri, request.scope, deadline)) {
+            is ValidationResult.Allowed -> validation.decision
+            is ValidationResult.Failed -> return TransportResult.Failure(validation.error)
         }
 
         val expectedHost = normalizeAsciiHost(request.uri.host)
@@ -80,6 +83,8 @@ class ValidatedHttpTransport(
             }
         }
         val pool = ConnectionPool(0, 1, TimeUnit.MILLISECONDS)
+        val remainingCallMillis = minOf(callTimeout.toMillis(), deadline.remaining().toMillis())
+        if (remainingCallMillis <= 0) return TransportResult.Failure(TransportError.TIMEOUT)
         val client = baseClient.newBuilder()
             .dns(pinnedDns)
             .proxy(Proxy.NO_PROXY)
@@ -87,7 +92,7 @@ class ValidatedHttpTransport(
             .followRedirects(false)
             .followSslRedirects(false)
             .retryOnConnectionFailure(false)
-            .callTimeout(callTimeout)
+            .callTimeout(remainingCallMillis, TimeUnit.MILLISECONDS)
             .build()
         val httpRequest = Request.Builder()
             .url(request.uri.toString())
@@ -102,9 +107,12 @@ class ValidatedHttpTransport(
                 val bytes = if (body == null || response.code == 304 || response.isRedirect) {
                     byteArrayOf()
                 } else {
-                    readBounded(body.source(), body.contentLength(), request.maxResponseBytes)
-                        ?: return TransportResult.Failure(TransportError.RESPONSE_TOO_LARGE)
+                    readBounded(body.source(), body.contentLength(), request.maxResponseBytes, deadline)
+                        ?: return TransportResult.Failure(
+                            if (deadline.isExpired()) TransportError.TIMEOUT else TransportError.RESPONSE_TOO_LARGE,
+                        )
                 }
+                if (deadline.isExpired()) return TransportResult.Failure(TransportError.TIMEOUT)
                 TransportResult.Success(
                     status = response.code,
                     contentType = normalizedContentType(response.header("Content-Type")),
@@ -119,6 +127,59 @@ class ValidatedHttpTransport(
         } finally {
             pool.evictAll()
         }
+    }
+
+    fun validateDestination(uri: URI, scope: CrawlScope, deadline: DeadlineBudget): TransportResult.Failure? =
+        when (val validation = validate(uri, scope, deadline)) {
+            is ValidationResult.Allowed -> null
+            is ValidationResult.Failed -> TransportResult.Failure(validation.error)
+        }
+
+    private fun validate(uri: URI, scope: CrawlScope, deadline: DeadlineBudget): ValidationResult {
+        val remainingNanos = deadline.remainingNanos()
+        if (remainingNanos <= 0) return ValidationResult.Failed(TransportError.TIMEOUT)
+        val future = try {
+            VALIDATION_EXECUTOR.submit<PolicyDecision> {
+                destinationValidator.validate(uri, scope.supplierRoot, scope.explicitHosts)
+            }
+        } catch (_: RejectedExecutionException) {
+            return ValidationResult.Failed(TransportError.TIMEOUT)
+        }
+        val decision = try {
+            future.get(remainingNanos, TimeUnit.NANOSECONDS)
+        } catch (_: TimeoutException) {
+            future.cancel(true)
+            return ValidationResult.Failed(TransportError.TIMEOUT)
+        } catch (_: InterruptedException) {
+            future.cancel(true)
+            Thread.currentThread().interrupt()
+            return ValidationResult.Failed(TransportError.TIMEOUT)
+        } catch (_: ExecutionException) {
+            return ValidationResult.Failed(TransportError.NETWORK_FAILURE)
+        }
+        if (deadline.isExpired()) return ValidationResult.Failed(TransportError.TIMEOUT)
+        return if (decision is PolicyDecision.Allowed) {
+            ValidationResult.Allowed(decision)
+        } else {
+            ValidationResult.Failed(TransportError.POLICY_REJECTED)
+        }
+    }
+
+    private sealed interface ValidationResult {
+        data class Allowed(val decision: PolicyDecision.Allowed) : ValidationResult
+        data class Failed(val error: TransportError) : ValidationResult
+    }
+
+    companion object {
+        private val VALIDATION_EXECUTOR = ThreadPoolExecutor(
+            0,
+            8,
+            30,
+            TimeUnit.SECONDS,
+            SynchronousQueue(),
+            { runnable -> Thread(runnable, "crawl-destination-validation").apply { isDaemon = true } },
+            ThreadPoolExecutor.AbortPolicy(),
+        )
     }
 }
 

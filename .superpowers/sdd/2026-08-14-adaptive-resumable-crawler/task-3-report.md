@@ -186,3 +186,82 @@ Result: `BUILD SUCCESS`; 97 tests run, 0 failures, 0 errors, 0 skipped. The exis
 - Redirect-loop, robots redirect/cache, robots `429`, target `429`, cross-destination `304`, structured MIME suffix, cached-representation limit, and total-deadline behavior have focused coverage.
 - No policy or canonicalization rule from Task 2 was duplicated or weakened; the small `DestinationValidator` seam exposes the existing decision and its resolved-address snapshot to both production transport and deterministic tests.
 - The legacy `ScrapeService` wiring concern from the initial report remains deferred to the orchestration task. No additional blocking concern remains for Task 3.
+
+## Review Fix Round 2
+
+### Remaining Findings Addressed
+
+- Optional Chromium `image`, `font`, `media`, and `other` routes are now intentionally aborted without marking the page terminally failed. Allowed document/script/stylesheet/XHR/fetch resources retain policy, robots, MIME, per-response, request-count, and aggregate-byte enforcement.
+- Renderer response metadata is recorded only for the main frame's terminal navigation response. Iframe responses can no longer replace final status, MIME, ETag, or Last-Modified metadata.
+- Renderer rejection state is checked after DOM stabilization and again immediately before success, preventing late policy, robots, MIME, or byte failures from escaping.
+- Added a monotonic `DeadlineBudget` shared across a complete fetch or render. Fetch validation, robots retrieval and per-origin lock waiting, bounded retry backoff, redirect hops, route validation, HTTP call/body streaming, render lock waiting, navigation, and DOM stabilization all consume the same remaining budget.
+- Destination validation/DNS now runs in a bounded daemon executor and is awaited only for the remaining operation budget. The caller fails with `TIMEOUT` when validation exceeds it; a fixed eight-worker/no-queue limit prevents abandoned OS resolver calls from growing without bound.
+- Robots deadline exhaustion is not inserted into the negative cache, so one short caller budget cannot poison a later request with a larger budget.
+
+### Round 2 RED Evidence
+
+Renderer control-flow regressions:
+
+```powershell
+& 'C:\Users\moham\.m2\wrapper\dists\apache-maven-3.8.6-bin\1ks0nkde5v1pk9vtc31i9d0lcd\apache-maven-3.8.6\bin\mvn.cmd' test '-Dtest=CrawlFetcherTest' '-Dmaven.repo.local=C:\Users\moham\.m2\repository'
+```
+
+Result: `BUILD FAILURE`; 20 tests run, 3 expected failures. Optional images/fonts/media returned `HTTP_FAILURE`, an iframe replaced the main ETag, and a late robots rejection incorrectly returned renderer success.
+
+Shared deadline wished-for API:
+
+```powershell
+& 'C:\Users\moham\.m2\wrapper\dists\apache-maven-3.8.6-bin\1ks0nkde5v1pk9vtc31i9d0lcd\apache-maven-3.8.6\bin\mvn.cmd' test '-Dtest=ValidatedHttpTransportTest,RobotsPolicyServiceTest,CrawlFetcherTest' '-Dmaven.repo.local=C:\Users\moham\.m2\repository'
+```
+
+Result: expected `BUILD FAILURE` during test compilation because `DeadlineBudget`, `NanoTimeSource`, request `maximumDuration`, deadline-bearing transport/robots overloads, and the fetcher clock seam did not exist.
+
+Queued-render deadline:
+
+```powershell
+& 'C:\Users\moham\.m2\wrapper\dists\apache-maven-3.8.6-bin\1ks0nkde5v1pk9vtc31i9d0lcd\apache-maven-3.8.6\bin\mvn.cmd' test '-Dtest=CrawlFetcherTest#renderer maximum wait includes time queued behind another render' '-Dmaven.repo.local=C:\Users\moham\.m2\repository'
+```
+
+Result: `BUILD FAILURE`; 1 test run / 1 failure. The second render waited beyond its 50 ms maximum and then succeeded because the old timer began only after acquiring the global render monitor.
+
+Navigation deadline classification:
+
+```powershell
+& 'C:\Users\moham\.m2\wrapper\dists\apache-maven-3.8.6-bin\1ks0nkde5v1pk9vtc31i9d0lcd\apache-maven-3.8.6\bin\mvn.cmd' test '-Dtest=CrawlFetcherTest#renderer reports timeout when navigation exhausts the absolute deadline' '-Dmaven.repo.local=C:\Users\moham\.m2\repository'
+```
+
+Result: `BUILD FAILURE`; 1 test run / 1 failure. Expected `TIMEOUT` but the expired navigation path returned `NETWORK_FAILURE`.
+
+### Round 2 GREEN and Verification Evidence
+
+Task 3 plus relevant Task 2 policy/canonicalization safety:
+
+```powershell
+& 'C:\Users\moham\.m2\wrapper\dists\apache-maven-3.8.6-bin\1ks0nkde5v1pk9vtc31i9d0lcd\apache-maven-3.8.6\bin\mvn.cmd' test '-Dtest=ValidatedHttpTransportTest,RobotsPolicyServiceTest,CrawlFetcherTest,CrawlPolicyTest,UrlCanonicalizerTest' '-Dmaven.repo.local=C:\Users\moham\.m2\repository'
+```
+
+Result: `BUILD SUCCESS`; 64 tests run, 0 failures, 0 errors, 0 skipped.
+
+Compile:
+
+```powershell
+& 'C:\Users\moham\.m2\wrapper\dists\apache-maven-3.8.6-bin\1ks0nkde5v1pk9vtc31i9d0lcd\apache-maven-3.8.6\bin\mvn.cmd' compile '-DskipTests' '-Dmaven.repo.local=C:\Users\moham\.m2\repository'
+```
+
+Result: `BUILD SUCCESS`; only the pre-existing deprecated `URL(String)` warning in legacy `ScrapeService.kt`.
+
+Full backend regression suite:
+
+```powershell
+& 'C:\Users\moham\.m2\wrapper\dists\apache-maven-3.8.6-bin\1ks0nkde5v1pk9vtc31i9d0lcd\apache-maven-3.8.6\bin\mvn.cmd' test '-Dmaven.repo.local=C:\Users\moham\.m2\repository'
+```
+
+Result: `BUILD SUCCESS`; 109 tests run, 0 failures, 0 errors, 0 skipped. Existing Surefire no-fork, MockK/ByteBuddy dynamic-agent, PDFBox cache-directory, and Flyway/PostgreSQL-version warnings remain non-failing.
+
+### Round 2 Coverage and Self-Review
+
+- Captured Playwright handler tests distinguish main frames from iframes, prove optional image/font/media aborts remain non-terminal, and inject a late disallowed script after navigation to prove the post-stabilization rejection checks.
+- Local MockWebServer coverage exercises renderer script MIME rejection, the 1 MiB per-subresource ceiling, the four-times-document aggregate network budget, destination-validation deadline exhaustion before any network I/O, robots backoff exhaustion before a retry, and one deadline spanning robots, target redirects, and final validation.
+- A concurrent captured-render test proves lock queue time consumes `maximumWait`; a navigation failure after deadline exhaustion is classified as `TIMEOUT`.
+- Cancellation cannot force the platform's native DNS resolver itself to honor thread interruption. The caller still returns at its deadline, and the bounded/no-queue validation executor fails closed under resolver saturation instead of allowing unbounded work. This is not a Task 3 blocker.
+- The earlier concern remains: a real Chromium integration fixture is deferred until the renderer is wired into the crawl worker. No deferred scratch-report or cleanup minor was changed.

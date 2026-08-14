@@ -3,6 +3,7 @@ package com.rfp.service.crawl
 import com.microsoft.playwright.Browser
 import com.microsoft.playwright.BrowserContext
 import com.microsoft.playwright.BrowserType
+import com.microsoft.playwright.Frame
 import com.microsoft.playwright.Page
 import com.microsoft.playwright.Playwright
 import com.microsoft.playwright.Response
@@ -24,6 +25,10 @@ import org.junit.jupiter.api.Test
 import java.net.InetAddress
 import java.net.URI
 import java.time.Duration
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.function.Consumer
 
 class CrawlFetcherTest {
@@ -277,6 +282,31 @@ class CrawlFetcherTest {
     }
 
     @Test
+    fun `fetch redirects share one deadline including policy and robots work`() {
+        server.dispatcher = pathDispatcher(
+            mapOf(
+                "/robots.txt" to MockResponse().setBody("User-agent: *\nAllow: /"),
+                "/start" to MockResponse().setResponseCode(302).setHeader("Location", "/final"),
+                "/final" to MockResponse().setHeader("Content-Type", "text/html").setBody("too late"),
+            ),
+        )
+        val clock = MutableNanoTimeSource()
+        val serverAddress = InetAddress.getByName(server.hostName)
+        policy = DestinationValidator { _, _, _ ->
+            clock.advance(Duration.ofMillis(25))
+            PolicyDecision.Allowed(listOf(serverAddress))
+        }
+        val fetcher = CrawlFetcher(
+            client, policy, UrlCanonicalizer(), robotsService(), nanoTimeSource = clock,
+        )
+
+        val result = fetcher.fetch(request("/start", maximumDuration = Duration.ofMillis(100)))
+
+        assertThat(result).isEqualTo(FetchResult.Rejected(FetchError.TIMEOUT, retryable = true))
+        assertThat(server.requestCount).isEqualTo(2)
+    }
+
+    @Test
     fun `does not start browser when HTTP response already has meaningful content`() {
         val fetch = FetchResult.Success(
             url = server.url("/product").toUri(),
@@ -403,7 +433,7 @@ class CrawlFetcherTest {
         val browser = mockk<Browser>()
         val context = mockContext(
             "<html><script src='/blocked.js'></script></html>",
-            listOf("/product" to "document", "/blocked.js" to "script"),
+            listOf(TestRoute("/product", "document"), TestRoute("/blocked.js", "script")),
         )
         every { playwright.chromium() } returns browserType
         every { browserType.launch(any()) } returns browser
@@ -426,6 +456,249 @@ class CrawlFetcherTest {
         assertThat(result).isEqualTo(FetchResult.Rejected(FetchError.ROBOTS_DISALLOWED))
         assertThat(server.requestCount).isEqualTo(2)
         renderer.close()
+    }
+
+    @Test
+    fun `renderer ignores intentionally aborted optional image font and media resources`() {
+        server.dispatcher = pathDispatcher(
+            mapOf(
+                "/robots.txt" to MockResponse().setBody("User-agent: *\nAllow: /"),
+                "/product" to MockResponse().setHeader("Content-Type", "text/html")
+                    .setBody("<html><body>product</body></html>"),
+            ),
+        )
+        val harness = rendererHarness(
+            mockContext(
+                "<html><body>rendered product</body></html>",
+                listOf(
+                    TestRoute("/product", "document"),
+                    TestRoute("/photo.png", "image"),
+                    TestRoute("/font.woff2", "font"),
+                    TestRoute("/video.mp4", "media"),
+                ),
+            ),
+        )
+
+        val result = harness.renderer.renderIfNeeded(
+            sparseFetch(), request("/product"), parserRequiresJavaScript = true, maximumWait = Duration.ofSeconds(1),
+        )
+
+        assertThat(result).isInstanceOf(FetchResult.Success::class.java)
+        assertThat(server.requestCount).isEqualTo(2)
+        harness.close()
+    }
+
+    @Test
+    fun `renderer keeps main-frame response metadata when an iframe loads later`() {
+        server.dispatcher = pathDispatcher(
+            mapOf(
+                "/robots.txt" to MockResponse().setBody("User-agent: *\nAllow: /"),
+                "/product" to MockResponse().setHeader("Content-Type", "text/html")
+                    .setHeader("ETag", "main-etag").setBody("<html><iframe></iframe></html>"),
+                "/frame" to MockResponse().setHeader("Content-Type", "text/html")
+                    .setHeader("ETag", "iframe-etag").setBody("<html>iframe</html>"),
+            ),
+        )
+        val harness = rendererHarness(
+            mockContext(
+                "<html><iframe></iframe></html>",
+                listOf(TestRoute("/product", "document"), TestRoute("/frame", "document", mainFrame = false)),
+            ),
+        )
+
+        val result = harness.renderer.renderIfNeeded(
+            sparseFetch(), request("/product"), parserRequiresJavaScript = true, maximumWait = Duration.ofSeconds(1),
+        )
+
+        assertThat(result).isInstanceOf(FetchResult.Success::class.java)
+        assertThat((result as FetchResult.Success).etag).isEqualTo("main-etag")
+        harness.close()
+    }
+
+    @Test
+    fun `renderer observes a late route rejection before returning success`() {
+        server.dispatcher = pathDispatcher(
+            mapOf(
+                "/robots.txt" to MockResponse().setBody("User-agent: *\nDisallow: /late.js"),
+                "/product" to MockResponse().setHeader("Content-Type", "text/html")
+                    .setBody("<html><body>product</body></html>"),
+            ),
+        )
+        val harness = rendererHarness(
+            mockContext(
+                "<html><body>rendered product</body></html>",
+                lateRoutedResources = listOf(TestRoute("/late.js", "script")),
+            ),
+        )
+
+        val result = harness.renderer.renderIfNeeded(
+            sparseFetch(), request("/product"), parserRequiresJavaScript = true, maximumWait = Duration.ofSeconds(1),
+        )
+
+        assertThat(result).isEqualTo(FetchResult.Rejected(FetchError.ROBOTS_DISALLOWED))
+        assertThat(server.requestCount).isEqualTo(2)
+        harness.close()
+    }
+
+    @Test
+    fun `renderer route validation and robots share the maximum wait deadline`() {
+        server.dispatcher = pathDispatcher(
+            mapOf(
+                "/robots.txt" to MockResponse().setBody("User-agent: *\nAllow: /"),
+                "/product" to MockResponse().setHeader("Content-Type", "text/html")
+                    .setBody("<html><body>too late</body></html>"),
+            ),
+        )
+        val clock = MutableNanoTimeSource()
+        val serverAddress = InetAddress.getByName(server.hostName)
+        policy = DestinationValidator { _, _, _ ->
+            clock.advance(Duration.ofMillis(60))
+            PolicyDecision.Allowed(listOf(serverAddress))
+        }
+        val harness = rendererHarness(
+            mockContext("<html><body>must not succeed</body></html>"),
+            nanoTimeSource = clock,
+        )
+
+        val result = harness.renderer.renderIfNeeded(
+            sparseFetch(), request("/product"), parserRequiresJavaScript = true,
+            maximumWait = Duration.ofMillis(100),
+        )
+
+        assertThat(result).isEqualTo(FetchResult.Rejected(FetchError.TIMEOUT))
+        assertThat(server.requestCount).isEqualTo(1)
+        harness.close()
+    }
+
+    @Test
+    fun `renderer maximum wait includes time queued behind another render`() {
+        server.dispatcher = pathDispatcher(
+            mapOf(
+                "/robots.txt" to MockResponse().setBody("User-agent: *\nAllow: /"),
+                "/product" to MockResponse().setHeader("Content-Type", "text/html").setBody("<html></html>"),
+            ),
+        )
+        val enteredNavigation = CountDownLatch(1)
+        val releaseNavigation = CountDownLatch(1)
+        val firstContext = mockContext("<html>first</html>") {
+            enteredNavigation.countDown()
+            releaseNavigation.await(1, TimeUnit.SECONDS)
+        }
+        val secondContext = mockContext("<html>second</html>")
+        val harness = rendererHarness(firstContext, additionalContexts = listOf(secondContext))
+        val executor = Executors.newSingleThreadExecutor()
+        val first = executor.submit<FetchResult> {
+            harness.renderer.renderIfNeeded(
+                sparseFetch(), request("/product"), parserRequiresJavaScript = true,
+                maximumWait = Duration.ofSeconds(1),
+            )
+        }
+        assertThat(enteredNavigation.await(1, TimeUnit.SECONDS)).isTrue()
+        CompletableFuture.delayedExecutor(200, TimeUnit.MILLISECONDS).execute(releaseNavigation::countDown)
+
+        val second = harness.renderer.renderIfNeeded(
+            sparseFetch(), request("/product"), parserRequiresJavaScript = true,
+            maximumWait = Duration.ofMillis(50),
+        )
+
+        assertThat(second).isEqualTo(FetchResult.Rejected(FetchError.TIMEOUT))
+        releaseNavigation.countDown()
+        first.get(1, TimeUnit.SECONDS)
+        executor.shutdownNow()
+        harness.close()
+    }
+
+    @Test
+    fun `renderer reports timeout when navigation exhausts the absolute deadline`() {
+        val clock = MutableNanoTimeSource()
+        val context = mockContext("<html>never reached</html>") {
+            clock.advance(Duration.ofMillis(101))
+            throw IllegalStateException("simulated Playwright navigation timeout")
+        }
+        val harness = rendererHarness(context, nanoTimeSource = clock)
+
+        val result = harness.renderer.renderIfNeeded(
+            sparseFetch(), request("/product"), parserRequiresJavaScript = true,
+            maximumWait = Duration.ofMillis(100),
+        )
+
+        assertThat(result).isEqualTo(FetchResult.Rejected(FetchError.TIMEOUT))
+        harness.close()
+    }
+
+    @Test
+    fun `renderer rejects an invalid script MIME from a captured route`() {
+        server.dispatcher = pathDispatcher(
+            mapOf(
+                "/robots.txt" to MockResponse().setBody("User-agent: *\nAllow: /"),
+                "/product" to MockResponse().setHeader("Content-Type", "text/html").setBody("<html></html>"),
+                "/bad.js" to MockResponse().setHeader("Content-Type", "text/plain").setBody("alert(1)"),
+            ),
+        )
+        val harness = rendererHarness(
+            mockContext(
+                "<html><script></script></html>",
+                listOf(TestRoute("/product", "document"), TestRoute("/bad.js", "script")),
+            ),
+        )
+
+        val result = harness.renderer.renderIfNeeded(
+            sparseFetch(), request("/product"), parserRequiresJavaScript = true, maximumWait = Duration.ofSeconds(1),
+        )
+
+        assertThat(result).isEqualTo(FetchResult.Rejected(FetchError.UNSUPPORTED_CONTENT_TYPE))
+        harness.close()
+    }
+
+    @Test
+    fun `renderer enforces the per-response subresource byte cap`() {
+        val oversizedScript = "x".repeat(1024 * 1024 + 1)
+        server.dispatcher = pathDispatcher(
+            mapOf(
+                "/robots.txt" to MockResponse().setBody("User-agent: *\nAllow: /"),
+                "/product" to MockResponse().setHeader("Content-Type", "text/html").setBody("<html></html>"),
+                "/large.js" to MockResponse().setHeader("Content-Type", "application/javascript")
+                    .setChunkedBody(oversizedScript, 8192),
+            ),
+        )
+        val harness = rendererHarness(
+            mockContext(
+                "<html><script></script></html>",
+                listOf(TestRoute("/product", "document"), TestRoute("/large.js", "script")),
+            ),
+        )
+
+        val result = harness.renderer.renderIfNeeded(
+            sparseFetch(), request("/product", maxResponseBytes = 2L * 1024 * 1024),
+            parserRequiresJavaScript = true, maximumWait = Duration.ofSeconds(2),
+        )
+
+        assertThat(result).isEqualTo(FetchResult.Rejected(FetchError.RESPONSE_TOO_LARGE))
+        harness.close()
+    }
+
+    @Test
+    fun `renderer enforces the aggregate routed response byte cap`() {
+        val responses = mutableMapOf<String, MockResponse>(
+            "/robots.txt" to MockResponse().setBody("User-agent: *\nAllow: /"),
+            "/product" to MockResponse().setHeader("Content-Type", "text/html").setBody("<html></html>"),
+        )
+        val routes = mutableListOf(TestRoute("/product", "document"))
+        repeat(5) { index ->
+            responses["/part-$index.js"] = MockResponse().setHeader("Content-Type", "application/javascript")
+                .setBody("x".repeat(900))
+            routes += TestRoute("/part-$index.js", "script")
+        }
+        server.dispatcher = pathDispatcher(responses)
+        val harness = rendererHarness(mockContext("<html><body>small DOM</body></html>", routes))
+
+        val result = harness.renderer.renderIfNeeded(
+            sparseFetch(), request("/product", maxResponseBytes = 1024),
+            parserRequiresJavaScript = true, maximumWait = Duration.ofSeconds(2),
+        )
+
+        assertThat(result).isEqualTo(FetchResult.Rejected(FetchError.RESPONSE_TOO_LARGE))
+        harness.close()
     }
 
     @Test
@@ -483,6 +756,7 @@ class CrawlFetcherTest {
         maxResponseBytes: Long = 1024,
         previous: StoredFetchContent? = null,
         maxRedirects: Int = 5,
+        maximumDuration: Duration = Duration.ofSeconds(20),
     ): CrawlFetchRequest {
         val root = server.url("/").toUri()
         return CrawlFetchRequest(
@@ -492,6 +766,7 @@ class CrawlFetcherTest {
             userAgent = "rfp-crawler",
             maxResponseBytes = maxResponseBytes,
             maxRedirects = maxRedirects,
+            maximumDuration = maximumDuration,
             previous = previous,
         )
     }
@@ -503,30 +778,39 @@ class CrawlFetcherTest {
 
     private fun mockContext(
         html: String,
-        routedResources: List<Pair<String, String>> = listOf("/product" to "document"),
+        routedResources: List<TestRoute> = listOf(TestRoute("/product", "document")),
+        lateRoutedResources: List<TestRoute> = emptyList(),
         domByteLength: Int = html.toByteArray().size,
+        beforeNavigate: () -> Unit = {},
     ): BrowserContext {
         val context = mockk<BrowserContext>()
         val page = mockk<Page>()
         val response = mockk<Response>()
+        val mainFrame = mockk<Frame>()
+        val childFrame = mockk<Frame>()
         renderedPages += page
-        val routes = routedResources.map { (path, resourceType) ->
+        fun routeFor(spec: TestRoute): com.microsoft.playwright.Route {
             val route = mockk<com.microsoft.playwright.Route>()
             val browserRequest = mockk<com.microsoft.playwright.Request>()
             every { route.request() } returns browserRequest
             every { route.fulfill(any()) } just Runs
             every { route.abort() } just Runs
-            every { browserRequest.url() } returns server.url(path).toString()
-            every { browserRequest.resourceType() } returns resourceType
-            every { browserRequest.isNavigationRequest() } returns (resourceType == "document")
-            route
+            every { browserRequest.url() } returns server.url(spec.path).toString()
+            every { browserRequest.resourceType() } returns spec.resourceType
+            every { browserRequest.isNavigationRequest() } returns (spec.resourceType == "document")
+            every { browserRequest.frame() } returns if (spec.mainFrame) mainFrame else childFrame
+            return route
         }
+        val routes = routedResources.map(::routeFor)
+        val lateRoutes = lateRoutedResources.map(::routeFor)
         val handler = slot<Consumer<com.microsoft.playwright.Route>>()
         every { context.route("**/*", capture(handler)) } just Runs
         every { context.newPage() } returns page
         every { context.close() } just Runs
+        every { page.mainFrame() } returns mainFrame
         every { page.addInitScript(any<String>()) } just Runs
         every { page.navigate(any(), any()) } answers {
+            beforeNavigate()
             routes.forEach(handler.captured::accept)
             response
         }
@@ -534,10 +818,53 @@ class CrawlFetcherTest {
         every { page.evaluate(match<String> { it.contains("TextEncoder") }) } returns
             domByteLength
         every { page.evaluate(match<String> { it.contains("__rfpMutationCount") }) } returns "0:${html.length}"
-        every { page.waitForTimeout(any()) } just Runs
+        var lateRoutesDelivered = false
+        every { page.waitForTimeout(any()) } answers {
+            if (!lateRoutesDelivered) {
+                lateRoutesDelivered = true
+                lateRoutes.forEach(handler.captured::accept)
+            }
+        }
         every { page.url() } returns server.url("/product").toString()
         every { response.status() } returns 200
         return context
+    }
+
+    private fun sparseFetch() = FetchResult.Success(
+        server.url("/product").toUri(), 200, "text/html", "<div></div>".toByteArray(),
+        null, null, FetchMethod.HTTP, "hash",
+    )
+
+    private fun rendererHarness(
+        context: BrowserContext,
+        nanoTimeSource: NanoTimeSource = SystemNanoTimeSource,
+        additionalContexts: List<BrowserContext> = emptyList(),
+    ): RendererHarness {
+        val playwright = mockk<Playwright>()
+        val browserType = mockk<BrowserType>()
+        val browser = mockk<Browser>()
+        every { playwright.chromium() } returns browserType
+        every { browserType.launch(any()) } returns browser
+        every { browser.newContext(any()) } returnsMany (listOf(context) + additionalContexts)
+        every { browser.close() } just Runs
+        every { playwright.close() } just Runs
+        return RendererHarness(
+            PlaywrightRenderer(client, policy, robotsService(), nanoTimeSource = nanoTimeSource) { playwright },
+        )
+    }
+
+    private data class TestRoute(val path: String, val resourceType: String, val mainFrame: Boolean = true)
+
+    private data class RendererHarness(val renderer: PlaywrightRenderer) {
+        fun close() = renderer.close()
+    }
+
+    private class MutableNanoTimeSource : NanoTimeSource {
+        private var nanos = 0L
+        override fun nanoTime(): Long = nanos
+        fun advance(duration: Duration) {
+            nanos += duration.toNanos()
+        }
     }
 
     private val renderedPages = mutableListOf<Page>()

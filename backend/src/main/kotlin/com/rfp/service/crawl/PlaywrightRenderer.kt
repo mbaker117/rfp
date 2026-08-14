@@ -14,15 +14,18 @@ import java.net.URI
 import java.time.Duration
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.locks.ReentrantLock
 
 class PlaywrightRenderer(
     client: OkHttpClient,
     destinationValidator: DestinationValidator,
     private val robotsPolicy: RobotsPolicyService,
+    private val nanoTimeSource: NanoTimeSource = SystemNanoTimeSource,
     private val playwrightFactory: () -> Playwright = { Playwright.create() },
 ) {
     private val transport = ValidatedHttpTransport(client, destinationValidator)
-    private val browserLock = Any()
+    private val browserLock = ReentrantLock()
 
     @Volatile private var playwright: Playwright? = null
     @Volatile private var browser: Browser? = null
@@ -38,10 +41,22 @@ class PlaywrightRenderer(
         require(!maximumWait.isNegative && !maximumWait.isZero) { "maximumWait must be positive" }
         if (fetch.contentType != "text/html" && fetch.contentType != "application/xhtml+xml") return fetch
         if (!parserRequiresJavaScript && meaningfulTextLength(fetch) >= meaningfulContentThreshold) return fetch
-        return synchronized(browserLock) { render(fetch.url, request, maximumWait) }
+        val deadline = DeadlineBudget.start(maximumWait, nanoTimeSource)
+        val acquired = try {
+            browserLock.tryLock(deadline.remainingNanos(), TimeUnit.NANOSECONDS)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            false
+        }
+        if (!acquired) return FetchResult.Rejected(FetchError.TIMEOUT)
+        return try {
+            render(fetch.url, request, deadline)
+        } finally {
+            browserLock.unlock()
+        }
     }
 
-    private fun render(uri: URI, request: CrawlFetchRequest, maximumWait: Duration): FetchResult {
+    private fun render(uri: URI, request: CrawlFetchRequest, deadline: DeadlineBudget): FetchResult {
         val context = sharedBrowser().newContext(
             Browser.NewContextOptions()
                 .setUserAgent(request.userAgent)
@@ -52,23 +67,26 @@ class PlaywrightRenderer(
             val documentResponse = AtomicReference<TransportResult.Success?>()
             val requestCount = AtomicLong()
             val totalBytes = AtomicLong()
+            val page = context.newPage()
             context.route("**/*") { route ->
-                handleRoute(route, request, rejected, documentResponse, requestCount, totalBytes)
+                handleRoute(route, page, request, deadline, rejected, documentResponse, requestCount, totalBytes)
             }
 
-            val page = context.newPage()
             page.addInitScript(MUTATION_OBSERVER_SCRIPT)
-            val startedAt = System.nanoTime()
+            val navigationTimeout = deadline.remaining().toMillis()
+            if (navigationTimeout <= 0) return FetchResult.Rejected(FetchError.TIMEOUT)
             runCatching {
                 page.navigate(
                     uri.toString(),
                     Page.NavigateOptions()
                         .setWaitUntil(WaitUntilState.DOMCONTENTLOADED)
-                        .setTimeout(maximumWait.toMillis().toDouble()),
+                        .setTimeout(navigationTimeout.toDouble()),
                 )
             }.getOrElse {
-                return FetchResult.Rejected(rejected.get() ?: FetchError.NETWORK_FAILURE)
+                val error = rejected.get() ?: if (deadline.isExpired()) FetchError.TIMEOUT else FetchError.NETWORK_FAILURE
+                return FetchResult.Rejected(error)
             }
+            if (deadline.isExpired()) return FetchResult.Rejected(FetchError.TIMEOUT)
             rejected.get()?.let { return FetchResult.Rejected(it) }
             val networkDocument = documentResponse.get()
                 ?: return FetchResult.Rejected(FetchError.HTTP_FAILURE)
@@ -79,7 +97,9 @@ class PlaywrightRenderer(
                 return FetchResult.Rejected(FetchError.UNSUPPORTED_CONTENT_TYPE)
             }
 
-            waitForDomStability(page, startedAt, maximumWait)
+            waitForDomStability(page, deadline)
+            if (deadline.isExpired()) return FetchResult.Rejected(FetchError.TIMEOUT)
+            rejected.get()?.let { return FetchResult.Rejected(it) }
             val domBytes = (page.evaluate(DOM_BYTE_LENGTH_SCRIPT) as? Number)?.toLong()
                 ?: return FetchResult.Rejected(FetchError.HTTP_FAILURE)
             if (domBytes > request.maxResponseBytes) {
@@ -92,6 +112,8 @@ class PlaywrightRenderer(
             }
             val finalUri = runCatching { URI(page.url()) }.getOrNull()
                 ?: return FetchResult.Rejected(FetchError.POLICY_REJECTED)
+            rejected.get()?.let { return FetchResult.Rejected(it) }
+            if (deadline.isExpired()) return FetchResult.Rejected(FetchError.TIMEOUT)
             return FetchResult.Success(
                 url = finalUri,
                 status = networkDocument.status,
@@ -107,12 +129,19 @@ class PlaywrightRenderer(
 
     private fun handleRoute(
         route: Route,
+        page: Page,
         request: CrawlFetchRequest,
+        deadline: DeadlineBudget,
         rejected: AtomicReference<FetchError?>,
         documentResponse: AtomicReference<TransportResult.Success?>,
         requestCount: AtomicLong,
         totalBytes: AtomicLong,
     ) {
+        if (deadline.isExpired()) {
+            rejected.compareAndSet(null, FetchError.TIMEOUT)
+            route.abort()
+            return
+        }
         val browserRequest = route.request()
         val uri = runCatching { URI(browserRequest.url()) }.getOrNull()
         if (uri == null || uri.scheme !in setOf("http", "https")) {
@@ -120,12 +149,16 @@ class PlaywrightRenderer(
             return
         }
         val resourceType = browserRequest.resourceType()
+        if (resourceType in OPTIONAL_RESOURCE_TYPES) {
+            route.abort()
+            return
+        }
         if (resourceType !in ALLOWED_RESOURCE_TYPES || requestCount.incrementAndGet() > MAX_ROUTED_REQUESTS) {
             rejected.compareAndSet(null, FetchError.HTTP_FAILURE)
             route.abort()
             return
         }
-        when (robotsPolicy.canFetch(uri, request.userAgent, request.scope)) {
+        when (robotsPolicy.canFetch(uri, request.userAgent, request.scope, deadline)) {
             RobotsDecision.Allowed -> Unit
             RobotsDecision.Disallowed -> {
                 rejected.compareAndSet(null, FetchError.ROBOTS_DISALLOWED)
@@ -138,19 +171,29 @@ class PlaywrightRenderer(
                 return
             }
         }
+        if (deadline.isExpired()) {
+            rejected.compareAndSet(null, FetchError.TIMEOUT)
+            route.abort()
+            return
+        }
         val perResponseLimit = if (resourceType == "document") {
             request.maxResponseBytes
         } else {
             minOf(request.maxResponseBytes, MAX_SUBRESOURCE_BYTES)
         }
         when (val response = transport.execute(
-            TransportRequest(uri, request.scope, request.userAgent, perResponseLimit),
+            TransportRequest(uri, request.scope, request.userAgent, perResponseLimit, deadline = deadline),
         )) {
             is TransportResult.Failure -> {
                 rejected.compareAndSet(null, response.error.toRendererError())
                 route.abort()
             }
             is TransportResult.Success -> {
+                if (deadline.isExpired()) {
+                    rejected.compareAndSet(null, FetchError.TIMEOUT)
+                    route.abort()
+                    return
+                }
                 if (!isAllowedResourceMime(resourceType, response.contentType, response.status)) {
                     rejected.compareAndSet(null, FetchError.UNSUPPORTED_CONTENT_TYPE)
                     route.abort()
@@ -161,7 +204,11 @@ class PlaywrightRenderer(
                     route.abort()
                     return
                 }
-                if (browserRequest.isNavigationRequest() && response.status !in REDIRECT_STATUSES) {
+                if (
+                    browserRequest.isNavigationRequest() &&
+                    browserRequest.frame() == page.mainFrame() &&
+                    response.status !in REDIRECT_STATUSES
+                ) {
                     documentResponse.set(response)
                 }
                 route.fulfill(
@@ -174,12 +221,12 @@ class PlaywrightRenderer(
         }
     }
 
-    private fun waitForDomStability(page: Page, startedAt: Long, maximumWait: Duration) {
-        val maximumNanos = maximumWait.toNanos()
+    private fun waitForDomStability(page: Page, deadline: DeadlineBudget) {
+        if (deadline.isExpired()) return
         var previous = page.evaluate(DOM_FINGERPRINT_SCRIPT)?.toString()
         var stableChecks = 0
-        while (System.nanoTime() - startedAt < maximumNanos && stableChecks < 2) {
-            val remainingMillis = (maximumNanos - (System.nanoTime() - startedAt)) / 1_000_000
+        while (!deadline.isExpired() && stableChecks < 2) {
+            val remainingMillis = deadline.remaining().toMillis()
             if (remainingMillis <= 0) break
             page.waitForTimeout(minOf(100L, remainingMillis).toDouble())
             val current = page.evaluate(DOM_FINGERPRINT_SCRIPT)?.toString()
@@ -211,11 +258,14 @@ class PlaywrightRenderer(
 
     @PreDestroy
     fun close() {
-        synchronized(browserLock) {
+        browserLock.lock()
+        try {
             browser?.close()
             browser = null
             playwright?.close()
             playwright = null
+        } finally {
+            browserLock.unlock()
         }
     }
 
@@ -223,6 +273,7 @@ class PlaywrightRenderer(
         private const val MAX_ROUTED_REQUESTS = 64L
         private const val MAX_SUBRESOURCE_BYTES = 1024L * 1024L
         private val ALLOWED_RESOURCE_TYPES = setOf("document", "script", "stylesheet", "xhr", "fetch")
+        private val OPTIONAL_RESOURCE_TYPES = setOf("image", "font", "media", "other")
         private val REDIRECT_STATUSES = setOf(300, 301, 302, 303, 307, 308)
         private const val MUTATION_OBSERVER_SCRIPT = """
             (() => {

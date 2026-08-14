@@ -118,6 +118,31 @@ class RobotsPolicyServiceTest {
         assertThat(server.requestCount).isEqualTo(2)
     }
 
+    @Test
+    fun `robots backoff and retries cannot exceed the caller deadline`() {
+        server.enqueue(MockResponse().setResponseCode(503))
+        server.enqueue(MockResponse().setBody("User-agent: *\nAllow: /"))
+        val clock = MutableNanoTimeSource()
+        val scope = CrawlScope(server.url("/").toUri(), emptySet())
+        val service = RobotsPolicyService(
+            client = OkHttpClient(),
+            destinationValidator = DestinationValidator { _, _, _ ->
+                PolicyDecision.Allowed(listOf(java.net.InetAddress.getByName(server.hostName)))
+            },
+            maxAttempts = 2,
+            baseBackoff = Duration.ofSeconds(1),
+            maxBackoff = Duration.ofSeconds(1),
+            sleeper = RetrySleeper(clock::advance),
+            jitterMillis = { 0 },
+        )
+        val deadline = DeadlineBudget.start(Duration.ofMillis(50), clock)
+
+        val decision = service.canFetch(server.url("/product").toUri(), "rfp-crawler", scope, deadline)
+
+        assertThat(decision).isEqualTo(RobotsDecision.Unavailable(retryable = true, retryAfter = null))
+        assertThat(server.requestCount).isEqualTo(1)
+    }
+
     private fun service(
         maxAttempts: Int = 2,
         cacheTtl: Duration = Duration.ofHours(1),
@@ -145,5 +170,13 @@ class RobotsPolicyServiceTest {
         override fun getZone() = ZoneOffset.UTC
 
         override fun withZone(zone: java.time.ZoneId): Clock = this
+    }
+
+    private class MutableNanoTimeSource : NanoTimeSource {
+        private var nanos = 0L
+        override fun nanoTime(): Long = nanos
+        fun advance(duration: Duration) {
+            nanos += duration.toNanos()
+        }
     }
 }

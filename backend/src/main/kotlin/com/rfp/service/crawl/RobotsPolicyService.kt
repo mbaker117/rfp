@@ -13,6 +13,8 @@ import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.locks.ReentrantLock
 
 sealed interface RobotsDecision {
     data object Allowed : RobotsDecision
@@ -38,13 +40,14 @@ class RobotsPolicyService(
     private val maxRobotsBytes: Long = 512 * 1024,
     private val baseBackoff: Duration = Duration.ofMillis(100),
     private val maxBackoff: Duration = Duration.ofSeconds(2),
+    private val defaultOperationTimeout: Duration = Duration.ofSeconds(20),
     private val clock: Clock = Clock.systemUTC(),
     private val sleeper: RetrySleeper = RetrySleeper { Thread.sleep(it.toMillis()) },
     private val jitterMillis: (Long) -> Long = { bound -> if (bound <= 0) 0 else kotlin.random.Random.nextLong(bound + 1) },
 ) {
     private val transport = ValidatedHttpTransport(client, destinationValidator)
     private val cache = ConcurrentHashMap<CacheKey, CachedValue>()
-    private val originLocks = ConcurrentHashMap<CacheKey, Any>()
+    private val originLocks = ConcurrentHashMap<CacheKey, ReentrantLock>()
 
     init {
         require(!cacheTtl.isNegative && !cacheTtl.isZero) { "cacheTtl must be positive" }
@@ -56,10 +59,20 @@ class RobotsPolicyService(
 
     fun canFetch(uri: URI, userAgent: String): RobotsDecision {
         val origin = originOf(uri) ?: return unavailable(retryable = false)
-        return canFetch(uri, userAgent, CrawlScope(origin, emptySet()))
+        return canFetch(
+            uri,
+            userAgent,
+            CrawlScope(origin, emptySet()),
+            DeadlineBudget.start(defaultOperationTimeout),
+        )
     }
 
     fun canFetch(uri: URI, userAgent: String, scope: CrawlScope): RobotsDecision {
+        return canFetch(uri, userAgent, scope, DeadlineBudget.start(defaultOperationTimeout))
+    }
+
+    fun canFetch(uri: URI, userAgent: String, scope: CrawlScope, deadline: DeadlineBudget): RobotsDecision {
+        if (deadline.isExpired()) return unavailable(retryable = true)
         val requestingOrigin = originOf(uri) ?: return unavailable(retryable = false)
         val key = CacheKey(
             requestingOrigin = requestingOrigin,
@@ -67,31 +80,59 @@ class RobotsPolicyService(
             explicitHosts = scope.explicitHosts.map { it.lowercase(Locale.ROOT) }.sorted(),
         )
         val now = clock.instant()
-        cache[key]?.takeIf { now.isBefore(it.expiresAt) }?.let { return it.value.decisionFor(uri, userAgent) }
+        cache[key]?.takeIf { now.isBefore(it.expiresAt) }?.let {
+            val decision = it.value.decisionFor(uri, userAgent)
+            return if (deadline.isExpired()) unavailable(retryable = true) else decision
+        }
 
-        val lock = originLocks.computeIfAbsent(key) { Any() }
-        return synchronized(lock) {
+        val lock = originLocks.computeIfAbsent(key) { ReentrantLock() }
+        val acquired = try {
+            lock.tryLock(deadline.remainingNanos(), TimeUnit.NANOSECONDS)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            false
+        }
+        if (!acquired) return unavailable(retryable = true)
+        return try {
+            if (deadline.isExpired()) return unavailable(retryable = true)
             val refreshedNow = clock.instant()
             cache[key]?.takeIf { refreshedNow.isBefore(it.expiresAt) }
-                ?.let { return@synchronized it.value.decisionFor(uri, userAgent) }
+                ?.let {
+                    val decision = it.value.decisionFor(uri, userAgent)
+                    return if (deadline.isExpired()) unavailable(retryable = true) else decision
+                }
 
-            val value = retrievePolicy(requestingOrigin, scope, userAgent)
-            val ttl = if (value is CachedPolicy) cacheTtl else negativeCacheTtl
-            cache[key] = CachedValue(value, clock.instant().plus(ttl))
-            value.decisionFor(uri, userAgent)
+            val value = retrievePolicy(requestingOrigin, scope, userAgent, deadline)
+            if (!deadline.isExpired()) {
+                val ttl = if (value is CachedPolicy) cacheTtl else negativeCacheTtl
+                cache[key] = CachedValue(value, clock.instant().plus(ttl))
+            }
+            val decision = value.decisionFor(uri, userAgent)
+            if (deadline.isExpired()) unavailable(retryable = true) else decision
+        } finally {
+            lock.unlock()
         }
     }
 
-    private fun retrievePolicy(origin: URI, scope: CrawlScope, userAgent: String): CacheableRobotsValue {
+    private fun retrievePolicy(
+        origin: URI,
+        scope: CrawlScope,
+        userAgent: String,
+        deadline: DeadlineBudget,
+    ): CacheableRobotsValue {
         var preservedRetryAfter: Duration? = null
         repeat(maxAttempts) { attempt ->
-            when (val result = retrieveAttempt(origin.resolve("/robots.txt"), scope, userAgent)) {
+            if (deadline.isExpired()) return CachedFailure(unavailable(true, preservedRetryAfter))
+            when (val result = retrieveAttempt(origin.resolve("/robots.txt"), scope, userAgent, deadline)) {
                 is RetrievalResult.Policy -> return CachedPolicy(result.policy)
                 is RetrievalResult.TerminalFailure -> return CachedFailure(unavailable(false, result.retryAfter))
                 is RetrievalResult.RetryableFailure -> {
                     preservedRetryAfter = maxDuration(preservedRetryAfter, result.retryAfter)
                     if (attempt + 1 < maxAttempts) {
-                        sleeper.sleep(backoffFor(attempt, result.retryAfter))
+                        val delay = deadline.cap(backoffFor(attempt, result.retryAfter))
+                        if (delay.isZero) return CachedFailure(unavailable(true, preservedRetryAfter))
+                        sleeper.sleep(delay)
+                        if (deadline.isExpired()) return CachedFailure(unavailable(true, preservedRetryAfter))
                     }
                 }
             }
@@ -99,13 +140,19 @@ class RobotsPolicyService(
         return CachedFailure(unavailable(true, preservedRetryAfter))
     }
 
-    private fun retrieveAttempt(initialUri: URI, scope: CrawlScope, userAgent: String): RetrievalResult {
+    private fun retrieveAttempt(
+        initialUri: URI,
+        scope: CrawlScope,
+        userAgent: String,
+        deadline: DeadlineBudget,
+    ): RetrievalResult {
         var current = initialUri
         val visited = mutableSetOf<URI>()
         for (redirectCount in 0..maxRedirects) {
+            if (deadline.isExpired()) return RetrievalResult.RetryableFailure(null)
             if (!visited.add(current)) return RetrievalResult.TerminalFailure(null)
             when (val response = transport.execute(
-                TransportRequest(current, scope, userAgent, maxRobotsBytes),
+                TransportRequest(current, scope, userAgent, maxRobotsBytes, deadline = deadline),
             )) {
                 is TransportResult.Failure -> return when (response.error) {
                     TransportError.POLICY_REJECTED -> RetrievalResult.TerminalFailure(null)
@@ -226,12 +273,18 @@ class RobotsPolicyService(
     }
 }
 
-internal fun readBounded(source: BufferedSource, declaredLength: Long, maxBytes: Long): ByteArray? {
+internal fun readBounded(
+    source: BufferedSource,
+    declaredLength: Long,
+    maxBytes: Long,
+    deadline: DeadlineBudget? = null,
+): ByteArray? {
     if (declaredLength > maxBytes) return null
     val output = ByteArrayOutputStream(minOf(maxBytes, 8192L).toInt())
     val chunk = ByteArray(8192)
     var total = 0L
     while (true) {
+        if (deadline?.isExpired() == true) return null
         val remainingWithSentinel = maxBytes - total + 1
         val read = source.read(chunk, 0, minOf(chunk.size.toLong(), remainingWithSentinel).toInt())
         if (read == -1) break

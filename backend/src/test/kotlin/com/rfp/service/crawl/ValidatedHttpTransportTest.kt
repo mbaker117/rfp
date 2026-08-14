@@ -72,4 +72,34 @@ class ValidatedHttpTransportTest {
 
         assertThat(result).isEqualTo(TransportResult.Failure(TransportError.TIMEOUT))
     }
+
+    @Test
+    fun `absolute deadline includes destination validation before network I O`() {
+        val clock = MutableNanoTimeSource()
+        val validatedAddress = InetAddress.getByName(server.hostName)
+        val transport = ValidatedHttpTransport(
+            OkHttpClient(),
+            DestinationValidator { _, _, _ ->
+                clock.advance(Duration.ofMillis(101))
+                PolicyDecision.Allowed(listOf(validatedAddress))
+            },
+        )
+        val uri = URI("http://deadline.invalid:${server.port}/never-requested")
+        val deadline = DeadlineBudget.start(Duration.ofMillis(100), clock)
+
+        val result = transport.execute(
+            TransportRequest(uri, CrawlScope(uri, emptySet()), "rfp-crawler", 1024, deadline = deadline),
+        )
+
+        assertThat(result).isEqualTo(TransportResult.Failure(TransportError.TIMEOUT))
+        assertThat(server.requestCount).isZero()
+    }
+
+    private class MutableNanoTimeSource : NanoTimeSource {
+        private var nanos = 0L
+        override fun nanoTime(): Long = nanos
+        fun advance(duration: Duration) {
+            nanos += duration.toNanos()
+        }
+    }
 }

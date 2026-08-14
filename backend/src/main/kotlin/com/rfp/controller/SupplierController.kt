@@ -35,7 +35,8 @@ fun Supplier.toResponse() = SupplierResponse(
 
 data class IngestDto(
     val id: Long, val kind: String, val filename: String?,
-    val status: String, val startedAt: String?, val finishedAt: String?
+    val status: String, val startedAt: String?, val finishedAt: String?,
+    val errorMsg: String?
 )
 
 @RestController
@@ -119,6 +120,6 @@ class SupplierController(
     @GetMapping("/{id}/ingests")
     fun listIngests(@PathVariable id: Long, @RequestHeader("Authorization") auth: String): ResponseEntity<List<IngestDto>> {
         val ingests = catalogIngestRepo.findBySupplierId(id)
-        return ResponseEntity.ok(ingests.map { IngestDto(it.id, it.kind, it.filename, it.status, it.startedAt?.toString(), it.finishedAt?.toString()) })
+        return ResponseEntity.ok(ingests.map { IngestDto(it.id, it.kind, it.filename, it.status, it.startedAt?.toString(), it.finishedAt?.toString(), it.errorMsg) })
     }
 }

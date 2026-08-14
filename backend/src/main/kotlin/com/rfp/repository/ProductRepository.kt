@@ -37,4 +37,24 @@ interface ProductRepository : JpaRepository<Product, Long> {
         """
     )
     fun searchByNameOrMpn(q: String?, pageable: Pageable): Page<Product>
+
+    @Query(
+        value = """
+            SELECT p FROM Product p
+            JOIN FETCH p.supplier
+            LEFT JOIN FETCH p.productClass
+            WHERE p.supplier.id = :supplierId
+              AND (:q IS NULL OR :q = ''
+                   OR LOWER(p.name) LIKE LOWER(CONCAT('%', :q, '%'))
+                   OR LOWER(COALESCE(p.mpn,'')) LIKE LOWER(CONCAT('%', :q, '%')))
+        """,
+        countQuery = """
+            SELECT COUNT(p) FROM Product p
+            WHERE p.supplier.id = :supplierId
+              AND (:q IS NULL OR :q = ''
+                   OR LOWER(p.name) LIKE LOWER(CONCAT('%', :q, '%'))
+                   OR LOWER(COALESCE(p.mpn,'')) LIKE LOWER(CONCAT('%', :q, '%')))
+        """
+    )
+    fun searchBySupplierAndNameOrMpn(supplierId: Long, q: String?, pageable: Pageable): Page<Product>
 }

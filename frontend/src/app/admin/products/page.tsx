@@ -1,39 +1,61 @@
 'use client';
 import { useEffect, useState } from 'react';
 import { api } from '@/src/lib/api';
-import type { AdminProduct } from '@/src/lib/types';
+import type { AdminProduct, Supplier } from '@/src/lib/types';
 import { useAuth } from '@/src/hooks/useAuth';
 
 export default function AdminProductsPage() {
   const { token } = useAuth();
   const [products, setProducts] = useState<AdminProduct[]>([]);
+  const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [total, setTotal] = useState(0);
   const [q, setQ] = useState('');
+  const [supplierId, setSupplierId] = useState<number | ''>('');
   const [page, setPage] = useState(0);
   const [error, setError] = useState('');
   const SIZE = 50;
 
   useEffect(() => {
     if (!token) return;
-    api.admin.listProducts(token, { page, size: SIZE, q: q || undefined })
+    api.listSuppliers(token).then(setSuppliers).catch(() => {});
+  }, [token]);
+
+  useEffect(() => {
+    if (!token) return;
+    api.admin.listProducts(token, {
+      page, size: SIZE, q: q || undefined,
+      supplierId: supplierId !== '' ? supplierId : undefined,
+    })
       .then(r => { setProducts(r.content); setTotal(r.totalElements); })
       .catch(e => setError(String(e)));
-  }, [token, page, q]);
+  }, [token, page, q, supplierId]);
 
   const pages = Math.ceil(total / SIZE);
 
   return (
     <div className="p-8 space-y-6">
-      <div className="flex items-center justify-between gap-4">
+      <div className="flex items-center justify-between gap-4 flex-wrap">
         <h2 className="text-xl font-semibold text-slate-900">
           Products <span className="text-slate-400 font-normal text-base">({total})</span>
         </h2>
-        <input
-          value={q}
-          onChange={e => { setQ(e.target.value); setPage(0); }}
-          placeholder="Search by name or MPN…"
-          className="border border-slate-300 rounded-md px-3 py-2 text-sm w-64 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-        />
+        <div className="flex gap-2">
+          <select
+            value={supplierId}
+            onChange={e => { setSupplierId(e.target.value === '' ? '' : Number(e.target.value)); setPage(0); }}
+            className="border border-slate-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+          >
+            <option value="">All suppliers</option>
+            {suppliers.map(s => (
+              <option key={s.id} value={s.id}>{s.name}</option>
+            ))}
+          </select>
+          <input
+            value={q}
+            onChange={e => { setQ(e.target.value); setPage(0); }}
+            placeholder="Search by name or MPN…"
+            className="border border-slate-300 rounded-md px-3 py-2 text-sm w-56 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+          />
+        </div>
       </div>
 
       {error && (

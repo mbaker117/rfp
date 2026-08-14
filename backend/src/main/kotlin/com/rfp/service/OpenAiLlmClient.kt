@@ -3,6 +3,7 @@ package com.rfp.service
 import com.fasterxml.jackson.databind.ObjectMapper
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
+import java.util.concurrent.TimeUnit
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.springframework.beans.factory.annotation.Value
@@ -17,7 +18,11 @@ class OpenAiLlmClient(
     @Value("\${rfp.llm.base-url:https://api.openai.com/v1/}") val baseUrl: String = "https://api.openai.com/v1/"
 ) : LlmClient {
 
-    private val client = OkHttpClient()
+    private val client = OkHttpClient.Builder()
+        .connectTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(120, TimeUnit.SECONDS)
+        .writeTimeout(30, TimeUnit.SECONDS)
+        .build()
     private val mapper = ObjectMapper()
 
     override fun call(systemPrompt: String, userMessage: String): String {

@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
 
 ---
 
@@ -60,7 +60,7 @@ docker compose up --build
 # RFP_LLM_API_KEY=<anthropic or openai key>
 # JWT_SECRET=<at least 32 chars>
 # RFP_LLM_PROVIDER=anthropic   # or openai
-# RFP_LLM_MODEL=claude-sonnet-4-6
+# RFP_LLM_MODEL=Codex-sonnet-4-6
 ```
 
 ---

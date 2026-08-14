@@ -54,10 +54,14 @@ class AdminController(
     fun listProducts(
         @RequestParam(defaultValue = "0") page: Int,
         @RequestParam(defaultValue = "50") size: Int,
-        @RequestParam(required = false) q: String?
+        @RequestParam(required = false) q: String?,
+        @RequestParam(required = false) supplierId: Long?
     ): PageResult<ProductDto> {
         val pageable = PageRequest.of(page, size, Sort.by("name"))
-        val result = productRepo.searchByNameOrMpn(q, pageable)
+        val result = if (supplierId != null)
+            productRepo.searchBySupplierAndNameOrMpn(supplierId, q, pageable)
+        else
+            productRepo.searchByNameOrMpn(q, pageable)
         return PageResult(
             content = result.content.map { p ->
                 ProductDto(

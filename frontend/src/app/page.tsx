@@ -8,7 +8,7 @@ import { api } from '@/src/lib/api';
 import { useAuth } from '@/src/hooks/useAuth';
 
 export default function Home() {
-  const { token } = useAuth();
+  const { token, logout } = useAuth();
   const router = useRouter();
 
   // Step 1
@@ -120,9 +120,14 @@ export default function Home() {
     <main className="min-h-screen bg-slate-50">
       <nav className="bg-white border-b border-slate-200 px-6 py-3 flex items-center justify-between">
         <span className="font-semibold text-slate-900">RFP Matching</span>
-        <a href="/admin" className="text-sm text-slate-500 hover:text-indigo-600 transition-colors">
-          Admin →
-        </a>
+        <div className="flex items-center gap-4">
+          <a href="/admin" className="text-sm text-slate-500 hover:text-indigo-600 transition-colors">
+            Admin →
+          </a>
+          <button onClick={logout} className="text-sm text-slate-500 hover:text-red-500 transition-colors">
+            Log out
+          </button>
+        </div>
       </nav>
 
       <div className="max-w-3xl mx-auto py-12 px-4 space-y-6">

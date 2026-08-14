@@ -115,12 +115,13 @@ export const api = {
     },
     async listProducts(
       token: string,
-      opts?: { page?: number; size?: number; q?: string }
+      opts?: { page?: number; size?: number; q?: string; supplierId?: number }
     ): Promise<PageResult<AdminProduct>> {
       const params = new URLSearchParams();
       if (opts?.page !== undefined) params.set('page', String(opts.page));
       if (opts?.size !== undefined) params.set('size', String(opts.size));
       if (opts?.q) params.set('q', opts.q);
+      if (opts?.supplierId !== undefined) params.set('supplierId', String(opts.supplierId));
       const res = await fetch(`${BASE}/admin/products?${params}`, {
         headers: authHeaders(token),
       });

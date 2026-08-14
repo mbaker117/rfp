@@ -11,7 +11,7 @@ const navItems = [
 ];
 
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
-  const { token } = useAuth();
+  const { token, logout } = useAuth();
   const pathname = usePathname();
 
   if (!token) return null;
@@ -41,10 +41,16 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
             );
           })}
         </nav>
-        <div className="px-5 py-4 border-t border-slate-700">
-          <Link href="/" className="text-xs text-slate-500 hover:text-slate-300 transition-colors">
+        <div className="px-5 py-4 border-t border-slate-700 space-y-2">
+          <Link href="/" className="block text-xs text-slate-500 hover:text-slate-300 transition-colors">
             ← Back to App
           </Link>
+          <button
+            onClick={logout}
+            className="block text-xs text-slate-500 hover:text-red-400 transition-colors"
+          >
+            Log out
+          </button>
         </div>
       </aside>
 

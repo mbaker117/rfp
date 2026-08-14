@@ -73,6 +73,7 @@ export interface IngestRecord {
   status: string;
   startedAt: string | null;
   finishedAt: string | null;
+  errorMsg: string | null;
 }
 
 export interface AdminTender {

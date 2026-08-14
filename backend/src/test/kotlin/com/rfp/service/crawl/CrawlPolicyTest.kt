@@ -3,6 +3,7 @@ package com.rfp.service.crawl
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Test
 import java.net.InetAddress
+import java.net.Inet6Address
 import java.net.URI
 import java.net.UnknownHostException
 
@@ -159,6 +160,102 @@ class CrawlPolicyTest {
     }
 
     @Test
+    fun `rejects IPv4-mapped IPv6 loopback private and metadata addresses`() {
+        val answers = listOf(
+            mappedIpv6(127, 0, 0, 1),
+            mappedIpv6(10, 0, 0, 7),
+            mappedIpv6(169, 254, 169, 254),
+        )
+
+        val decisions = answers.mapIndexed { index, answer ->
+            val host = "mapped$index.example.com"
+            resolver.answers[host] = listOf(answer)
+            policy.validate(URI("https://$host/catalog"), URI("https://example.com"), emptySet())
+        }
+
+        assertThat(decisions).containsOnly(PolicyDecision.Rejected(PolicyRejection.NON_PUBLIC_ADDRESS))
+    }
+
+    @Test
+    fun `rejects IPv4 embedding transition ranges`() {
+        val answers = listOf(
+            InetAddress.getByName("64:ff9b::7f00:1"),
+            InetAddress.getByName("2002:7f00:1::"),
+            InetAddress.getByName("2001:0:4136:e378:8000:63bf:3fff:fdd2"),
+            InetAddress.getByName("2001:4860:1:2:0:5efe:7f00:1"),
+            InetAddress.getByName("0:0:0:0:ffff:0:7f00:1"),
+        )
+
+        val decisions = answers.mapIndexed { index, answer ->
+            val host = "transition$index.example.com"
+            resolver.answers[host] = listOf(answer)
+            policy.validate(URI("https://$host/catalog"), URI("https://example.com"), emptySet())
+        }
+
+        assertThat(decisions).containsOnly(PolicyDecision.Rejected(PolicyRejection.NON_PUBLIC_ADDRESS))
+    }
+
+    @Test
+    fun `rejects representative non-global IANA IPv6 ranges`() {
+        val answers = listOf(
+            InetAddress.getByName("100::1"),
+            InetAddress.getByName("2001:2::1"),
+            InetAddress.getByName("3fff::1"),
+            InetAddress.getByName("5f00::1"),
+        )
+
+        val decisions = answers.mapIndexed { index, answer ->
+            val host = "special$index.example.com"
+            resolver.answers[host] = listOf(answer)
+            policy.validate(URI("https://$host/catalog"), URI("https://example.com"), emptySet())
+        }
+
+        assertThat(decisions).containsOnly(PolicyDecision.Rejected(PolicyRejection.NON_PUBLIC_ADDRESS))
+    }
+
+    @Test
+    fun `Unicode explicit host cannot authorize legacy ASCII mapping collision`() {
+        resolver.answers["fass.de"] = listOf(InetAddress.getByName("8.8.8.8"))
+
+        val decision = policy.validate(
+            URI("https://fass.de/manual.pdf"),
+            URI("https://example.com"),
+            setOf("faß.de"),
+        )
+
+        assertThat(decision).isEqualTo(PolicyDecision.Rejected(PolicyRejection.HOST_NOT_ALLOWED))
+        assertThat(resolver.requestedHosts).isEmpty()
+    }
+
+    @Test
+    fun `rejects Unicode target and supplier hostnames before DNS`() {
+        val unicodeTarget = URI("https://faß.de/manual.pdf")
+        val unicodeSupplier = URI("https://faß.de/")
+        resolver.answers["catalog.fass.de"] = listOf(InetAddress.getByName("8.8.8.8"))
+
+        assertThat(
+            policy.validate(unicodeTarget, URI("https://example.com"), emptySet()),
+        ).isEqualTo(PolicyDecision.Rejected(PolicyRejection.INVALID_HOST))
+        assertThat(
+            policy.validate(URI("https://catalog.fass.de"), unicodeSupplier, emptySet()),
+        ).isEqualTo(PolicyDecision.Rejected(PolicyRejection.INVALID_HOST))
+        assertThat(resolver.requestedHosts).isEmpty()
+    }
+
+    @Test
+    fun `accepts exact prevalidated ASCII A-label explicit host`() {
+        resolver.answers["xn--fa-hia.de"] = listOf(InetAddress.getByName("8.8.8.8"))
+
+        val decision = policy.validate(
+            URI("https://xn--fa-hia.de/manual.pdf"),
+            URI("https://example.com"),
+            setOf("XN--FA-HIA.DE"),
+        )
+
+        assertThat(decision).isInstanceOf(PolicyDecision.Allowed::class.java)
+    }
+
+    @Test
     fun `rejects unsupported scheme before DNS resolution`() {
         val decision = policy.validate(
             URI("ftp://example.com/catalog"),
@@ -217,5 +314,16 @@ class CrawlPolicyTest {
             if (host in failures) throw UnknownHostException(host)
             return answers[host].orEmpty()
         }
+    }
+
+    private fun mappedIpv6(a: Int, b: Int, c: Int, d: Int): Inet6Address {
+        val bytes = ByteArray(16)
+        bytes[10] = 0xff.toByte()
+        bytes[11] = 0xff.toByte()
+        bytes[12] = a.toByte()
+        bytes[13] = b.toByte()
+        bytes[14] = c.toByte()
+        bytes[15] = d.toByte()
+        return Inet6Address.getByAddress(null, bytes, -1)
     }
 }

@@ -58,6 +58,26 @@ class UrlCanonicalizerTest {
     }
 
     @Test
+    fun `rejects Unicode hostname rather than applying legacy IDN mapping`() {
+        val result = canonicalizer.resolveAndNormalize(
+            URI("https://example.com/catalog/"),
+            "https://faß.de/manual.pdf",
+        )
+
+        assertThat(result).isNull()
+    }
+
+    @Test
+    fun `accepts prevalidated ASCII A-label hostname`() {
+        val result = canonicalizer.resolveAndNormalize(
+            URI("https://example.com/catalog/"),
+            "HTTPS://XN--FA-HIA.DE:443/manual.pdf",
+        )
+
+        assertThat(result.toString()).isEqualTo("https://xn--fa-hia.de/manual.pdf")
+    }
+
+    @Test
     fun `rejects blank malformed fragment-only unsupported and credentialed references`() {
         val page = URI("https://example.com/catalog/index.html")
 

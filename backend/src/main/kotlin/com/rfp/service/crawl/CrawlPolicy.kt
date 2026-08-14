@@ -1,8 +1,6 @@
 package com.rfp.service.crawl
 
 import com.google.common.net.InternetDomainName
-import com.google.common.net.InetAddresses
-import java.net.IDN
 import java.net.InetAddress
 import java.net.URI
 import java.util.Locale
@@ -48,11 +46,11 @@ class CrawlPolicy(
             return PolicyDecision.Rejected(PolicyRejection.INVALID_HOST)
         }
 
-        val host = normalizeHost(uri.host)
+        val host = normalizeAsciiHost(uri.host)
             ?: return PolicyDecision.Rejected(PolicyRejection.INVALID_HOST)
-        val supplierHost = normalizeHost(supplierRoot.host)
+        val supplierHost = normalizeAsciiHost(supplierRoot.host)
             ?: return PolicyDecision.Rejected(PolicyRejection.INVALID_HOST)
-        val normalizedExplicitHosts = explicitHosts.mapNotNull(::normalizeHost).toSet()
+        val normalizedExplicitHosts = explicitHosts.mapNotNull(::normalizeAsciiHost).toSet()
 
         if (!isAutomaticallyAllowed(host, supplierHost) && host !in normalizedExplicitHosts) {
             return PolicyDecision.Rejected(PolicyRejection.HOST_NOT_ALLOWED)
@@ -78,23 +76,6 @@ class CrawlPolicy(
     private fun registrableDomain(host: String): String? = runCatching {
         InternetDomainName.from(host).topPrivateDomain().toString()
     }.getOrNull()
-
-    private fun normalizeHost(host: String?): String? {
-        val withoutRootDot = host
-            ?.trim()
-            ?.trimEnd('.')
-            ?.removeSurrounding("[", "]")
-            ?.takeIf { it.isNotEmpty() }
-            ?: return null
-        if (withoutRootDot.contains(':')) {
-            return runCatching {
-                InetAddresses.toAddrString(InetAddresses.forString(withoutRootDot))
-            }.getOrNull()
-        }
-        return runCatching {
-            IDN.toASCII(withoutRootDot, IDN.USE_STD3_ASCII_RULES).lowercase(Locale.ROOT)
-        }.getOrNull()
-    }
 
     private fun isPublicDestination(address: InetAddress): Boolean {
         if (address.isAnyLocalAddress ||
@@ -137,9 +118,38 @@ class CrawlPolicy(
     }
 
     private fun isPublicIpv6(bytes: List<Int>): Boolean {
-        if (bytes[0] and 0xfe == 0xfc) return false
+        if (hasPrefix(bytes, intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff), 96)) return false
+        if (hasPrefix(bytes, intArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 0, 0), 96)) return false
         if (bytes.take(12).all { it == 0 }) return false
+        if (hasPrefix(bytes, intArrayOf(0x00, 0x64, 0xff, 0x9b, 0, 0, 0, 0, 0, 0, 0, 0), 96)) return false
+        if (hasPrefix(bytes, intArrayOf(0x00, 0x64, 0xff, 0x9b, 0x00, 0x01), 48)) return false
+        if (hasPrefix(bytes, intArrayOf(0x20, 0x02), 16)) return false
+        if (hasPrefix(bytes, intArrayOf(0x20, 0x01, 0x00, 0x00), 32)) return false
+        if (isIsatap(bytes)) return false
+        if (bytes[0] and 0xfe == 0xfc) return false
+        if (hasPrefix(bytes, intArrayOf(0x01, 0x00, 0, 0, 0, 0, 0, 0), 64)) return false
+        if (hasPrefix(bytes, intArrayOf(0x20, 0x01, 0x00, 0x02, 0, 0), 48)) return false
         if (bytes[0] == 0x20 && bytes[1] == 0x01 && bytes[2] == 0x0d && bytes[3] == 0xb8) return false
+        if (hasPrefix(bytes, intArrayOf(0x20, 0x01, 0x00, 0x10), 28)) return false
+        if (hasPrefix(bytes, intArrayOf(0x20, 0x01, 0x00, 0x20), 28)) return false
+        if (hasPrefix(bytes, intArrayOf(0x3f, 0xff, 0x00), 20)) return false
+        if (hasPrefix(bytes, intArrayOf(0x5f, 0x00), 16)) return false
         return true
+    }
+
+    private fun isIsatap(bytes: List<Int>): Boolean =
+        (bytes[8] == 0x00 || bytes[8] == 0x02) &&
+            bytes[9] == 0x00 &&
+            bytes[10] == 0x5e &&
+            bytes[11] == 0xfe
+
+    private fun hasPrefix(bytes: List<Int>, prefix: IntArray, prefixLength: Int): Boolean {
+        val fullBytes = prefixLength / 8
+        if ((0 until fullBytes).any { bytes[it] != prefix[it] }) return false
+
+        val remainingBits = prefixLength % 8
+        if (remainingBits == 0) return true
+        val mask = 0xff shl (8 - remainingBits) and 0xff
+        return (bytes[fullBytes] and mask) == (prefix[fullBytes] and mask)
     }
 }

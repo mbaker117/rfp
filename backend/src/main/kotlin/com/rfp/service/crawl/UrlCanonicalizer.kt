@@ -26,7 +26,7 @@ class UrlCanonicalizer {
         if (scheme != "http" && scheme != "https") return null
         if (resolved.rawUserInfo != null) return null
 
-        val host = normalizeHost(resolved.host) ?: return null
+        val host = normalizeAsciiHost(resolved.host) ?: return null
         if (resolved.port != -1 && resolved.port !in 1..65535) return null
         val port = when {
             scheme == "http" && resolved.port == 80 -> -1
@@ -61,12 +61,35 @@ class UrlCanonicalizer {
         return key.startsWith("utm_") || key == "gclid" || key == "fbclid"
     }
 
-    private fun normalizeHost(host: String?): String? {
-        val unbracketed = host?.removeSurrounding("[", "]") ?: return null
-        return if (unbracketed.contains(':')) {
-            runCatching { InetAddresses.toAddrString(InetAddresses.forString(unbracketed)) }.getOrNull()
-        } else {
-            unbracketed.lowercase(Locale.ROOT)
-        }
+}
+
+internal fun normalizeAsciiHost(host: String?): String? {
+    val unbracketed = host
+        ?.trim()
+        ?.trimEnd('.')
+        ?.removeSurrounding("[", "]")
+        ?.takeIf { it.isNotEmpty() }
+        ?: return null
+    if (unbracketed.any { it.code > 0x7f }) return null
+
+    if (unbracketed.contains(':')) {
+        return runCatching {
+            InetAddresses.toAddrString(InetAddresses.forString(unbracketed))
+        }.getOrNull()
     }
+
+    val normalized = unbracketed.lowercase(Locale.ROOT)
+    if (normalized.length > 253) return null
+    val labels = normalized.split('.')
+    if (labels.any { label ->
+            label.isEmpty() ||
+                label.length > 63 ||
+                label.first() == '-' ||
+                label.last() == '-' ||
+                label.any { character -> !character.isLetterOrDigit() && character != '-' }
+        }
+    ) {
+        return null
+    }
+    return normalized
 }

@@ -52,11 +52,13 @@ export default function ReportPage() {
     fetchProposals();
   }, [token, id]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Poll every 3s while generatingProposals is true OR any proposal is GENERATING.
-  // Stop only when both conditions clear simultaneously.
   useEffect(() => {
     const hasGenerating = proposals.some(p => p.status === 'GENERATING');
-    if (!generatingProposals && !hasGenerating) { setGeneratingProposals(false); return; }
+    if (generatingProposals && !hasGenerating && proposals.length > 0) {
+      setGeneratingProposals(false);
+      return;
+    }
+    if (!generatingProposals && !hasGenerating) return;
     const t = setTimeout(fetchProposals, 3000);
     return () => clearTimeout(t);
   }, [proposals, generatingProposals, fetchProposals]);

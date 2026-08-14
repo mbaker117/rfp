@@ -16,6 +16,7 @@ import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase
 import org.springframework.dao.DataIntegrityViolationException
+import org.springframework.jdbc.core.JdbcTemplate
 import java.time.Instant
 import java.math.BigDecimal
 
@@ -27,7 +28,8 @@ class CrawlPersistenceTest(
     @Autowired val suppliers: SupplierRepository,
     @Autowired val products: ProductRepository,
     @Autowired val prices: ProductPriceRepository,
-    @Autowired val priceHistory: ProductPriceHistoryRepository
+    @Autowired val priceHistory: ProductPriceHistoryRepository,
+    @Autowired val jdbc: JdbcTemplate
 ) {
     @Test
     fun `frontier URL is unique per run and pending work can be claimed`() {
@@ -95,5 +97,33 @@ class CrawlPersistenceTest(
         assertThat(historical.sourceUrl).isEqualTo("https://shop.example.com/products/meter")
         assertThat(historical.extractionMethod).isEqualTo("JSON_LD")
         assertThat(historical.observedAt).isEqualTo(observedAt)
+    }
+
+    @Test
+    fun `final V7 migration provides price provenance without a follow-on migration`() {
+        val columns = jdbc.queryForList(
+            """
+                SELECT table_name || '.' || column_name
+                FROM information_schema.columns
+                WHERE table_name IN ('product_price', 'product_price_history')
+                  AND column_name IN ('source_url', 'extraction_method', 'observed_at')
+            """.trimIndent(),
+            String::class.java
+        )
+
+        val followOnMigration = jdbc.queryForObject(
+            "SELECT COUNT(*) FROM flyway_schema_history WHERE version = '8'",
+            Int::class.java
+        )
+
+        assertThat(columns).containsExactlyInAnyOrder(
+            "product_price.source_url",
+            "product_price.extraction_method",
+            "product_price.observed_at",
+            "product_price_history.source_url",
+            "product_price_history.extraction_method",
+            "product_price_history.observed_at"
+        )
+        assertThat(followOnMigration).isZero()
     }
 }

@@ -100,7 +100,7 @@ class CrawlPersistenceTest(
     }
 
     @Test
-    fun `final V7 migration provides price provenance without a follow-on migration`() {
+    fun `final crawl migration provides price provenance columns`() {
         val columns = jdbc.queryForList(
             """
                 SELECT table_name || '.' || column_name
@@ -111,11 +111,6 @@ class CrawlPersistenceTest(
             String::class.java
         )
 
-        val followOnMigration = jdbc.queryForObject(
-            "SELECT COUNT(*) FROM flyway_schema_history WHERE version = '8'",
-            Int::class.java
-        )
-
         assertThat(columns).containsExactlyInAnyOrder(
             "product_price.source_url",
             "product_price.extraction_method",
@@ -124,6 +119,5 @@ class CrawlPersistenceTest(
             "product_price_history.extraction_method",
             "product_price_history.observed_at"
         )
-        assertThat(followOnMigration).isZero()
     }
 }

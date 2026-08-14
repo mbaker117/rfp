@@ -16,13 +16,15 @@ class MatchingEngineServiceTest {
     private val productRepo = mockk<ProductRepository>()
     private val attrDefRepo = mockk<AttributeDefRepository>()
     private val matchResultRepo = mockk<MatchResultRepository>()
+    private val productPriceRepo = mockk<ProductPriceRepository>()
 
     private val supplier = Supplier(id = 1L, name = "Acme")
     private val productClass = ProductClass(id = 10L, name = "Multimeter")
     private val tender = Tender(id = 1L, userId = 1L, filename = "rfp.pdf", fileType = "pdf", status = "matching")
 
     private fun service() = MatchingEngineService(
-        tenderRepo, tenderLineRepo, tenderSupplierRepo, productRepo, attrDefRepo, matchResultRepo
+        tenderRepo, tenderLineRepo, tenderSupplierRepo, productRepo, attrDefRepo, matchResultRepo,
+        productPriceRepo
     )
 
     @Test
@@ -102,6 +104,7 @@ class MatchingEngineServiceTest {
         every { productRepo.findBySupplierIdInAndIsStaleAndProductClassId(listOf(1L), false, 10L) } returns listOf(product)
         every { attrDefRepo.findByProductClassId(10L) } returns attrDefs
         every { matchResultRepo.findByLineId(4L) } returns null
+        every { productPriceRepo.findAllById(any<Iterable<Long>>()) } returns emptyList()
         every { matchResultRepo.save(any()) } answers { firstArg() }
 
         service().matchTender(tender, listOf(1L))
@@ -129,6 +132,7 @@ class MatchingEngineServiceTest {
         every { productRepo.findBySupplierIdInAndIsStaleAndProductClassId(listOf(1L), false, 10L) } returns listOf(product)
         every { attrDefRepo.findByProductClassId(10L) } returns attrDefs
         every { matchResultRepo.findByLineId(5L) } returns null
+        every { productPriceRepo.findAllById(any<Iterable<Long>>()) } returns emptyList()
         every { matchResultRepo.save(any()) } answers { firstArg() }
 
         service().matchTender(tender, listOf(1L))
@@ -164,6 +168,7 @@ class MatchingEngineServiceTest {
         every { productRepo.findBySupplierIdInAndIsStaleAndProductClassId(listOf(1L), false, 10L) } returns products
         every { attrDefRepo.findByProductClassId(10L) } returns attrDefs
         every { matchResultRepo.findByLineId(6L) } returns null
+        every { productPriceRepo.findAllById(any<Iterable<Long>>()) } returns emptyList()
         every { matchResultRepo.save(any()) } answers { firstArg() }
 
         service().matchTender(tender, listOf(1L))
@@ -194,5 +199,45 @@ class MatchingEngineServiceTest {
 
         // Must save with the existing id=99 to trigger UPDATE not INSERT
         verify { matchResultRepo.save(match { it.id == 99L && it.score == 100 }) }
+    }
+
+    @Test
+    fun `alternatives JSON includes price and supplierName`() {
+        val line = TenderLine(id = 6L, tender = tender, rawText = "multimeter",
+            description = "multimeter", productClass = productClass,
+            attributes = mapper.writeValueAsString(mapOf("max_voltage" to 1000.0)))
+        val attrDefs = listOf(
+            AttributeDef(id = 1L, productClass = productClass, name = "max_voltage",
+                label = "Max V", datatype = "numeric", matchOp = "gte", canonicalUnit = "V")
+        )
+        val best = Product(id = 1L, supplier = supplier, productClass = productClass,
+            name = "P1", source = "upload",
+            attributes = mapper.writeValueAsString(mapOf("max_voltage" to 1200.0,
+                "description" to "A fine tool", "manualLink" to null)))
+        val alt = Product(id = 2L, supplier = supplier, productClass = productClass,
+            name = "P2", source = "upload",
+            attributes = mapper.writeValueAsString(mapOf("max_voltage" to 1100.0,
+                "description" to "Alt tool", "manualLink" to "https://example.com")))
+
+        every { tenderLineRepo.findByTenderId(1L) } returns listOf(line)
+        every { productRepo.findBySupplierIdInAndIsStaleAndNameIgnoreCase(any(), false, any()) } returns emptyList()
+        every { productRepo.findBySupplierIdInAndIsStaleAndMpnIgnoreCase(any(), false, any()) } returns emptyList()
+        every { productRepo.findBySupplierIdInAndIsStaleAndProductClassId(any(), false, 10L) } returns listOf(best, alt)
+        every { attrDefRepo.findByProductClassId(10L) } returns attrDefs
+        every { matchResultRepo.findByLineId(6L) } returns null
+        every { productPriceRepo.findAllById(any<Iterable<Long>>()) } returns listOf(
+            com.rfp.domain.ProductPrice(productId = 2L, price = java.math.BigDecimal("99.50"), currency = "JOD")
+        )
+        val saved = mutableListOf<com.rfp.domain.MatchResult>()
+        every { matchResultRepo.save(capture(saved)) } answers { firstArg() }
+
+        service().matchTender(tender, listOf(1L))
+
+        val altJson = mapper.readTree(saved.last().alternatives)
+        val altNode = altJson[0]
+        assertEquals("P2", altNode["name"].asText())
+        assertEquals(99.50, altNode["price"].asDouble(), 0.01)
+        assertEquals("Acme", altNode["supplierName"].asText())
+        assertEquals("Alt tool", altNode["description"].asText())
     }
 }

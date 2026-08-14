@@ -24,7 +24,8 @@ open class MatchingEngineService(
     private val tenderSupplierRepo: TenderSupplierRepository,
     private val productRepo: ProductRepository,
     private val attrDefRepo: AttributeDefRepository,
-    private val matchResultRepo: MatchResultRepository
+    private val matchResultRepo: MatchResultRepository,
+    private val productPriceRepo: ProductPriceRepository
 ) {
     private val mapper = ObjectMapper().apply { findAndRegisterModules() }
 
@@ -108,6 +109,10 @@ open class MatchingEngineService(
             else              -> "not_found"
         }
 
+        // Fetch prices for all alternatives in one query
+        val altProductIds = alternatives.map { it.productId }
+        val priceMap = productPriceRepo.findAllById(altProductIds).associateBy { it.productId }
+
         matchResultRepo.save(MatchResult(
             id = existingId,
             line = line,
@@ -118,9 +123,20 @@ open class MatchingEngineService(
             status = status,
             alternatives = mapper.writeValueAsString(alternatives.map { alt ->
                 val altProduct = candidates.first { c -> c.id == alt.productId }
-                mapOf("productId" to alt.productId, "name" to altProduct.name,
-                    "mpn" to altProduct.mpn, "score" to alt.score,
-                    "attributeVerdicts" to alt.verdicts)
+                val altPrice = priceMap[alt.productId]
+                val altAttrs: Map<String, Any> = mapper.readValue(altProduct.attributes)
+                mapOf(
+                    "productId" to alt.productId,
+                    "name" to altProduct.name,
+                    "mpn" to altProduct.mpn,
+                    "score" to alt.score,
+                    "attributeVerdicts" to alt.verdicts,
+                    "price" to altPrice?.price,
+                    "currency" to (altPrice?.currency ?: "JOD"),
+                    "description" to (altAttrs["description"] as? String),
+                    "manualLink" to (altAttrs["manualLink"] as? String),
+                    "supplierName" to altProduct.supplier.name
+                )
             })
         ))
     }

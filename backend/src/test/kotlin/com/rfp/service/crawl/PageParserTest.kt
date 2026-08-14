@@ -52,6 +52,54 @@ class PageParserTest {
         assertThat(result.signals.skippedEmbeddedJson).isEqualTo(2)
     }
 
+    @Test
+    fun `resolves page references against the first valid HTML base URL`() {
+        val html = """
+            <html><head>
+              <base href="javascript:alert(1)">
+              <base href="https://cdn.example.com/manufacturer/catalog/">
+              <base href="https://ignored.example.com/">
+              <link rel="canonical" href="meters/dmm-2000">
+              <script type="application/ld+json">
+                {"@type":"Product","mpn":"DMM-2000","offers":{"url":"buy/dmm-2000"}}
+              </script>
+            </head><body>
+              <a href="meters">Meters</a>
+              <a rel="next" href="page/2">Next</a>
+              <a class="manual" href="manuals/dmm-2000.pdf">Manual</a>
+            </body></html>
+        """.trimIndent()
+
+        val result = parser.parse(success(html))
+
+        assertThat(result.canonicalUrl.toString())
+            .isEqualTo("https://cdn.example.com/manufacturer/catalog/meters/dmm-2000")
+        assertThat(result.links.map { it.uri.toString() }).contains(
+            "https://cdn.example.com/manufacturer/catalog/meters",
+        )
+        assertThat(result.pagination.single().uri.toString())
+            .isEqualTo("https://cdn.example.com/manufacturer/catalog/page/2")
+        assertThat(result.documents.single().uri.toString())
+            .isEqualTo("https://cdn.example.com/manufacturer/catalog/manuals/dmm-2000.pdf")
+        assertThat(result.jsonLdProducts.single().offers.single().uri.toString())
+            .isEqualTo("https://cdn.example.com/manufacturer/catalog/buy/dmm-2000")
+    }
+
+    @Test
+    fun `discovers extensionless manuals from supported anchor media type`() {
+        val html = """
+            <html><body>
+              <a href="/download?id=dmm-1000" type="application/pdf">Download</a>
+            </body></html>
+        """.trimIndent()
+
+        val result = parser.parse(success(html))
+
+        assertThat(result.documents).hasSize(1)
+        assertThat(result.documents.single().uri.toString()).isEqualTo("https://example.com/download?id=dmm-1000")
+        assertThat(result.documents.single().mediaType).isEqualTo("application/pdf")
+    }
+
     private fun successFixture(name: String): FetchResult.Success = success(resourceBytes(name).toString(Charsets.UTF_8))
 
     private fun success(html: String) = FetchResult.Success(

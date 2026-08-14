@@ -29,13 +29,17 @@ class PageParser(
     fun parse(fetch: FetchResult.Success): ParsedPage {
         val html = fetch.body.toString(Charsets.UTF_8)
         val document = Jsoup.parse(html, fetch.url.toString())
+        val referenceBase = document.select("base[href]")
+            .mapNotNull { canonicalizer.resolveAndNormalize(fetch.url, it.attr("href")) }
+            .firstOrNull()
+            ?: fetch.url
         val canonicalUrl = document.selectFirst("link[rel~=canonical][href]")
             ?.attr("href")
-            ?.let { canonicalizer.resolveAndNormalize(fetch.url, it) }
+            ?.let { canonicalizer.resolveAndNormalize(referenceBase, it) }
             ?: fetch.url
 
         val links = document.select("a[href]").mapNotNull { anchor ->
-            canonicalizer.resolveAndNormalize(fetch.url, anchor.attr("href"))?.let {
+            canonicalizer.resolveAndNormalize(referenceBase, anchor.attr("href"))?.let {
                 DiscoveredLink(it, anchor.text().normalizedWhitespace())
             }
         }.distinctBy { it.uri }
@@ -56,12 +60,12 @@ class PageParser(
             )
         }
         val products = jsonLdRoots.flatMap { root ->
-            root.productNodes().map { it.toProduct(fetch.url) }
+            root.productNodes().map { it.toProduct(referenceBase) }
         }
         val pagination = document.select("a[href]")
             .filter(::isPaginationLink)
             .mapNotNull { anchor ->
-                canonicalizer.resolveAndNormalize(fetch.url, anchor.attr("href"))?.let {
+                canonicalizer.resolveAndNormalize(referenceBase, anchor.attr("href"))?.let {
                     DiscoveredLink(it, anchor.text().normalizedWhitespace())
                 }
             }
@@ -69,7 +73,7 @@ class PageParser(
         val documents = document.select("a[href]")
             .filter(::isDocumentLink)
             .mapNotNull { anchor ->
-                canonicalizer.resolveAndNormalize(fetch.url, anchor.attr("href"))?.let {
+                canonicalizer.resolveAndNormalize(referenceBase, anchor.attr("href"))?.let {
                     DiscoveredDocument(it, anchor.text().normalizedWhitespace(), anchor.attr("type").ifBlank { null })
                 }
             }
@@ -161,22 +165,12 @@ class PageParser(
     }
 
     private fun isDocumentLink(anchor: Element): Boolean {
-        val uri = runCatching { URI(anchor.attr("href")) }.getOrNull()
-        val extension = uri?.path?.substringAfterLast('.', "")?.lowercase(Locale.ROOT).orEmpty()
-        if (extension in DOCUMENT_EXTENSIONS) return true
-        if (extension == "html" || extension == "htm" || extension.isEmpty()) {
-            val hints = listOf(anchor.attr("href"), anchor.text(), anchor.className(), anchor.attr("rel"))
-                .joinToString(" ")
-                .lowercase(Locale.ROOT)
-            return DOCUMENT_HINTS.any(hints::contains)
-        }
-        return false
+        val uri = runCatching { URI(anchor.attr("href")) }.getOrNull() ?: return false
+        val hints = listOf(anchor.attr("href"), anchor.text(), anchor.className(), anchor.attr("rel"))
+            .joinToString(" ")
+        return CatalogDocumentFormatDetector.isDiscoverable(uri, anchor.attr("type").ifBlank { null }, hints)
     }
 
     private fun String.normalizedWhitespace(): String = trim().split(Regex("\\s+")).joinToString(" ")
 
-    private companion object {
-        val DOCUMENT_EXTENSIONS = setOf("pdf", "doc", "docx", "xls", "xlsx", "txt")
-        val DOCUMENT_HINTS = setOf("manual", "datasheet", "data-sheet", "catalog", "specification", "spec-sheet")
-    }
 }

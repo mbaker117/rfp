@@ -9,18 +9,16 @@ import org.springframework.beans.factory.annotation.Value
 import org.springframework.context.annotation.Lazy
 import org.springframework.scheduling.annotation.Async
 import org.springframework.stereotype.Service
+import java.net.URL
 import java.util.concurrent.TimeUnit
 
 // open so tests can subclass and override runScrapeJobAsync without Playwright
 @Service
 open class ScrapeService(
     private val llmService: LlmService,
-    @Value("\${rfp.scraper.throttle-ms:2000}") val throttleMs: Long = 2000
+    @Value("\${rfp.scraper.throttle-ms:1500}") val throttleMs: Long = 1500
 ) {
-    // Self-inject via setter to get the Spring proxy (fixes @Async bypass)
-    @Autowired
-    @Lazy
-    lateinit var self: ScrapeService
+    @Autowired @Lazy lateinit var self: ScrapeService
 
     @Async("taskExecutor")
     open fun runScrapeJobAsync(supplierId: Long) {
@@ -33,80 +31,53 @@ open class ScrapeService(
         .followRedirects(true)
         .build()
 
-    // Product-related path keywords to probe when homepage yields little content
-    private val productPaths = listOf(
-        "/products", "/product", "/catalog", "/catalogue",
-        "/shop", "/store", "/items", "/instruments",
-        "/equipment", "/hardware", "/solutions"
-    )
-
+    /**
+     * 3-stage pipeline:
+     *   1. Fetch homepage (Playwright → HTTP fallback)
+     *   2. LLM identifies which links lead to product catalog pages
+     *   3. Fetch those pages, combine, return for LLM extraction
+     */
     fun crawlWebsite(baseUrl: String): String {
+        // Stage 1 — homepage
         val homepageHtml = try {
             crawlWithPlaywright(baseUrl)
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             crawlWithHttp(baseUrl)
         }
 
-        // Try to extract product sub-pages from the homepage HTML
-        val additionalPages = extractProductLinks(baseUrl, homepageHtml)
-            .take(5)  // cap at 5 additional pages to avoid runaway
-            .mapNotNull { link ->
-                try {
-                    Thread.sleep(throttleMs)
-                    crawlWithHttp(link)
-                } catch (_: Exception) { null }
-            }
+        // Stage 2 — LLM discovers product page URLs
+        val discoveredUrls = llmService.identifyProductUrls(baseUrl, homepageHtml)
+            .map { resolveUrl(baseUrl, it) }
+            .filter { it.isNotBlank() }
+            .distinct()
+            .take(8)
 
-        // Also probe common product paths if few links were found
-        val probedPages = if (additionalPages.size < 2) {
-            val origin = baseUrl.trimEnd('/')
-            productPaths.mapNotNull { path ->
-                try {
-                    Thread.sleep(throttleMs)
-                    val html = crawlWithHttp("$origin$path")
-                    if (html.length > 500) html else null
-                } catch (_: Exception) { null }
-            }.take(3)
-        } else emptyList()
+        // Stage 3 — fetch product pages (throttled, failures silently skipped)
+        val productPages = discoveredUrls.mapNotNull { url ->
+            try {
+                Thread.sleep(throttleMs)
+                crawlWithHttp(url)
+            } catch (_: Exception) { null }
+        }
 
-        val allContent = (listOf(homepageHtml) + additionalPages + probedPages)
+        val allContent = (listOf(homepageHtml) + productPages)
             .joinToString("\n\n---PAGE---\n\n")
-        return allContent.take(24000)  // LLM will take first 12k; give more raw content
+        // LlmService takes first 12k — give generous raw content so product pages are included
+        return allContent.take(30000)
     }
 
-    private fun extractProductLinks(baseUrl: String, html: String): List<String> {
-        val origin = try {
-            val u = java.net.URL(baseUrl)
-            "${u.protocol}://${u.host}${if (u.port > 0 && u.port != 80 && u.port != 443) ":${u.port}" else ""}"
-        } catch (_: Exception) { return emptyList() }
-
-        val linkRegex = Regex("""href=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
-        val keywords = setOf("product", "catalog", "catalogue", "shop", "item",
-            "instrument", "equipment", "hardware", "solution")
-        return linkRegex.findAll(html)
-            .map { it.groupValues[1] }
-            .filter { href ->
-                val lower = href.lowercase()
-                keywords.any { lower.contains(it) }
-            }
-            .map { href ->
-                when {
-                    href.startsWith("http") -> href
-                    href.startsWith("//") -> "https:$href"
-                    href.startsWith("/") -> "$origin$href"
-                    else -> "$origin/$href"
-                }
-            }
-            .filter { it.startsWith(origin) }  // stay on same domain
-            .distinct()
-            .toList()
+    private fun resolveUrl(base: String, href: String): String {
+        if (href.startsWith("http://") || href.startsWith("https://")) return href
+        return try {
+            val u = URL(base)
+            val origin = "${u.protocol}://${u.host}${if (u.port > 0 && u.port != 80 && u.port != 443) ":${u.port}" else ""}"
+            if (href.startsWith("/")) "$origin$href" else "$origin/$href"
+        } catch (_: Exception) { "" }
     }
 
     private fun crawlWithPlaywright(url: String): String {
         Playwright.create().use { pw ->
-            val browser = pw.chromium().launch(
-                BrowserType.LaunchOptions().setHeadless(true)
-            )
+            val browser = pw.chromium().launch(BrowserType.LaunchOptions().setHeadless(true))
             val page = browser.newPage()
             page.navigate(url)
             page.waitForLoadState()
@@ -117,13 +88,13 @@ open class ScrapeService(
     }
 
     private fun crawlWithHttp(url: String): String {
-        val request = Request.Builder()
+        val req = Request.Builder()
             .url(url)
             .header("User-Agent", "Mozilla/5.0 (compatible; RFP-Scraper/1.0)")
             .build()
-        return httpClient.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) throw RuntimeException("HTTP ${response.code} for $url")
-            response.body?.string() ?: throw RuntimeException("Empty response from $url")
+        return httpClient.newCall(req).execute().use { r ->
+            if (!r.isSuccessful) throw RuntimeException("HTTP ${r.code} for $url")
+            r.body?.string() ?: throw RuntimeException("Empty response from $url")
         }
     }
 }

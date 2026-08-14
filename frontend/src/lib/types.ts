@@ -64,6 +64,7 @@ export interface AdminProduct {
   supplierName: string;
   productClass: string | null;
   isStale: boolean;
+  source: string | null;
 }
 
 export interface IngestRecord {

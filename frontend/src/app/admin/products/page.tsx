@@ -70,6 +70,7 @@ export default function AdminProductsPage() {
               <th className="text-left px-4 py-3 text-xs font-medium uppercase tracking-wide text-slate-500">MPN</th>
               <th className="text-left px-4 py-3 text-xs font-medium uppercase tracking-wide text-slate-500">Supplier</th>
               <th className="text-left px-4 py-3 text-xs font-medium uppercase tracking-wide text-slate-500">Class</th>
+              <th className="text-left px-4 py-3 text-xs font-medium uppercase tracking-wide text-slate-500">Source</th>
               <th className="px-4 py-3 text-xs font-medium uppercase tracking-wide text-slate-500">Stale</th>
             </tr>
           </thead>
@@ -80,6 +81,13 @@ export default function AdminProductsPage() {
                 <td className="px-4 py-3 text-slate-500 font-mono text-xs">{p.mpn ?? '—'}</td>
                 <td className="px-4 py-3 text-slate-600">{p.supplierName}</td>
                 <td className="px-4 py-3 text-slate-500">{p.productClass ?? '—'}</td>
+                <td className="px-4 py-3">
+                  {p.source && (
+                    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${
+                      p.source === 'scrape' ? 'bg-blue-100 text-blue-700' : 'bg-violet-100 text-violet-700'
+                    }`}>{p.source === 'scrape' ? 'web' : 'upload'}</span>
+                  )}
+                </td>
                 <td className="px-4 py-3">
                   {p.isStale && (
                     <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-700">stale</span>

@@ -16,6 +16,7 @@ export default function SupplierDetailPage() {
   const [tab, setTab] = useState<'products' | 'ingests'>('products');
   const [error, setError] = useState('');
   const [scrapeMsg, setScrapeMsg] = useState('');
+  const [websiteInput, setWebsiteInput] = useState('');
 
   useEffect(() => {
     if (!token) return;
@@ -31,19 +32,32 @@ export default function SupplierDetailPage() {
       .catch(e => setError(String(e)));
   }, [id, token]);
 
-  const triggerScrape = async () => {
+  const triggerScrape = async (websiteOverride?: string) => {
     setScrapeMsg('');
+    setError('');
     try {
+      // If supplier has no website, save the provided URL first
+      if (websiteOverride) {
+        const updateRes = await fetch(`${BASE}/suppliers/${id}`, {
+          method: 'PUT',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: supplier!.name, officialWebsite: websiteOverride }),
+        });
+        if (!updateRes.ok) throw new Error(`Could not save website: HTTP ${updateRes.status}`);
+        const updated = await updateRes.json();
+        setSupplier(updated);
+        setWebsiteInput('');
+      }
       const res = await fetch(`${BASE}/suppliers/${id}/catalog/scrape`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      setScrapeMsg('Scrape started — check Ingest History for status.');
-      // Refresh ingests after a moment
+      setScrapeMsg('Scrape started — LLM is discovering product pages. Check Ingest History for status.');
+      setTab('ingests');
       setTimeout(() => {
         api.admin.listIngests(Number(id), token).then(setIngests).catch(() => {});
-      }, 1500);
+      }, 2000);
     } catch (e) {
       setError('Scrape failed: ' + String(e));
     }
@@ -62,22 +76,44 @@ export default function SupplierDetailPage() {
             <a href={supplier.officialWebsite} target="_blank" rel="noreferrer"
               className="text-sm text-indigo-600 hover:underline">{supplier.officialWebsite}</a>
           )}
-          <div className="mt-3 flex items-center gap-4">
+          <div className="mt-3 flex items-center gap-3 flex-wrap">
             <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${
               supplier.scrapeStatus === 'DONE' ? 'bg-emerald-100 text-emerald-700' :
               supplier.scrapeStatus === 'FAILED' ? 'bg-red-100 text-red-700' :
               supplier.scrapeStatus === 'RUNNING' ? 'bg-amber-100 text-amber-700' :
               'bg-slate-100 text-slate-500'
             }`}>{supplier.scrapeStatus}</span>
-            {supplier.officialWebsite && (
+
+            {supplier.officialWebsite ? (
               <button
-                onClick={triggerScrape}
+                onClick={() => triggerScrape()}
                 className="text-sm bg-indigo-600 text-white px-3 py-1 rounded-md hover:bg-indigo-700 transition-colors"
               >
                 Trigger Scrape
               </button>
+            ) : (
+              <div className="flex items-center gap-2">
+                <input
+                  type="url"
+                  value={websiteInput}
+                  onChange={e => setWebsiteInput(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter' && websiteInput.trim()) triggerScrape(websiteInput.trim()); }}
+                  placeholder="https://supplier-website.com"
+                  className="border border-slate-300 rounded-md px-2 py-1 text-xs w-56 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                />
+                <button
+                  onClick={() => { if (websiteInput.trim()) triggerScrape(websiteInput.trim()); }}
+                  disabled={!websiteInput.trim()}
+                  className="text-xs bg-indigo-600 text-white px-2 py-1 rounded-md hover:bg-indigo-700 disabled:opacity-40 transition-colors"
+                >
+                  Scrape
+                </button>
+              </div>
             )}
-            {supplier.categories.length > 0 && <span className="text-sm text-slate-500">Categories: {supplier.categories.join(', ')}</span>}
+
+            {supplier.categories.length > 0 && (
+              <span className="text-sm text-slate-500">Categories: {supplier.categories.join(', ')}</span>
+            )}
           </div>
           {scrapeMsg && <p className="mt-2 text-sm text-emerald-600">{scrapeMsg}</p>}
         </div>
@@ -104,6 +140,7 @@ export default function SupplierDetailPage() {
                 <th className="text-left px-4 py-3 text-xs font-medium uppercase tracking-wide text-slate-500">Name</th>
                 <th className="text-left px-4 py-3 text-xs font-medium uppercase tracking-wide text-slate-500">MPN</th>
                 <th className="text-left px-4 py-3 text-xs font-medium uppercase tracking-wide text-slate-500">Class</th>
+                <th className="text-left px-4 py-3 text-xs font-medium uppercase tracking-wide text-slate-500">Source</th>
                 <th className="px-4 py-3 text-xs font-medium uppercase tracking-wide text-slate-500">Stale</th>
               </tr>
             </thead>
@@ -113,6 +150,13 @@ export default function SupplierDetailPage() {
                   <td className="px-4 py-3 text-slate-900">{p.name}</td>
                   <td className="px-4 py-3 text-slate-500 font-mono text-xs">{p.mpn ?? '—'}</td>
                   <td className="px-4 py-3 text-slate-500">{p.productClass ?? '—'}</td>
+                  <td className="px-4 py-3">
+                    {p.source && (
+                      <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${
+                        p.source === 'scrape' ? 'bg-blue-100 text-blue-700' : 'bg-violet-100 text-violet-700'
+                      }`}>{p.source === 'scrape' ? 'web' : 'upload'}</span>
+                    )}
+                  </td>
                   <td className="px-4 py-3">
                     {p.isStale && (
                       <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-700">

@@ -47,7 +47,7 @@ class LlmService(private val llmClient: LlmClient) {
               "price":number|null,"currency":string,"attributes":{key:value}}]}
             Handle Arabic and English. Do not add commentary.
         """.trimIndent()
-        val json = parseJson(call(system, rawText.take(12000)))
+        val json = parseJson(call(system, rawText.take(20000)))
         val products = json["products"] ?: throw LlmException("LLM response missing 'products' key")
         return products.map { p ->
             ParsedProduct(
@@ -91,6 +91,31 @@ class LlmService(private val llmClient: LlmClient) {
                 )
             }
         )
+    }
+
+    // Task 2b: given homepage HTML, find product catalog URLs
+    fun identifyProductUrls(baseUrl: String, homepageHtml: String): List<String> {
+        val system = """
+            You are analyzing the HTML of a supplier website homepage.
+            Identify all URLs or paths that lead to product catalog pages, product listings, or product category pages.
+            Ignore: contact, about, blog, news, login, register, social media, privacy, terms, FAQ.
+            Return ONLY a JSON array of up to 8 URLs (absolute or relative paths starting with / or http):
+            ["url1", "url2"]
+            If no product pages are found return [].
+            Do not add commentary or markdown.
+        """.trimIndent()
+        val user = "Base URL: $baseUrl\n\nHomepage HTML:\n${homepageHtml.take(8000)}"
+        return try {
+            val raw = llmClient.call(system, user)   // skip cache — each site is unique
+            val cleaned = raw.trim()
+                .removePrefix("```json").removePrefix("```")
+                .trimStart().removeSuffix("```").trimEnd()
+            val node = mapper.readTree(cleaned)
+            if (node.isArray) node.map { it.asText() }.filter { it.isNotBlank() }
+            else emptyList()
+        } catch (_: Exception) {
+            emptyList()
+        }
     }
 
     // Task 3: parse RFP/tender document into structured requirement lines

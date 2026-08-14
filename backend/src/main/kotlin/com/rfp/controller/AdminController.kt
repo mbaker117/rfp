@@ -13,7 +13,8 @@ data class UserDto(val id: Long, val username: String, val role: String)
 data class ProductDto(
     val id: Long, val name: String, val mpn: String?,
     val supplierId: Long,
-    val supplierName: String, val productClass: String?, val isStale: Boolean
+    val supplierName: String, val productClass: String?, val isStale: Boolean,
+    val source: String?
 )
 data class TenderDto(
     val id: Long, val filename: String, val userId: Long,
@@ -71,7 +72,8 @@ class AdminController(
                     supplierId = p.supplier.id,
                     supplierName = p.supplier.name,
                     productClass = p.productClass?.name,
-                    isStale = p.isStale
+                    isStale = p.isStale,
+                    source = p.source
                 )
             },
             totalElements = result.totalElements

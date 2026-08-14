@@ -627,6 +627,16 @@ class CrawlFetcherTest {
     }
 
     @Test
+    fun `renderer watchdog bounds a blocking DOM evaluate and closes its context`() {
+        assertBlockingRendererCallIsBounded("evaluate")
+    }
+
+    @Test
+    fun `renderer watchdog bounds blocking page content and closes its context`() {
+        assertBlockingRendererCallIsBounded("content")
+    }
+
+    @Test
     fun `renderer rejects an invalid script MIME from a captured route`() {
         server.dispatcher = pathDispatcher(
             mapOf(
@@ -835,6 +845,52 @@ class CrawlFetcherTest {
         null, null, FetchMethod.HTTP, "hash",
     )
 
+    private fun assertBlockingRendererCallIsBounded(blockingCall: String) {
+        server.dispatcher = pathDispatcher(
+            mapOf(
+                "/robots.txt" to MockResponse().setBody("User-agent: *\nAllow: /"),
+                "/product" to MockResponse().setHeader("Content-Type", "text/html").setBody("<html></html>"),
+            ),
+        )
+        val context = mockContext("<html>rendered</html>")
+        val page = renderedPages.last()
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val contextClosed = CountDownLatch(1)
+        every { context.close() } answers { contextClosed.countDown() }
+        if (blockingCall == "evaluate") {
+            every { page.evaluate(match<String> { it.contains("TextEncoder") }) } answers {
+                entered.countDown()
+                release.await(2, TimeUnit.SECONDS)
+                32
+            }
+        } else {
+            every { page.content() } answers {
+                entered.countDown()
+                release.await(2, TimeUnit.SECONDS)
+                "<html>rendered</html>"
+            }
+        }
+        val harness = rendererHarness(context)
+        CompletableFuture.delayedExecutor(1200, TimeUnit.MILLISECONDS).execute(release::countDown)
+
+        val startedAt = System.nanoTime()
+        val result = harness.renderer.renderIfNeeded(
+            sparseFetch(), request("/product"), parserRequiresJavaScript = true,
+            maximumWait = Duration.ofMillis(500),
+        )
+        val elapsed = Duration.ofNanos(System.nanoTime() - startedAt)
+
+        assertThat(entered.await(100, TimeUnit.MILLISECONDS)).isTrue()
+        assertThat(result).isEqualTo(FetchResult.Rejected(FetchError.TIMEOUT))
+        assertThat(elapsed).isLessThan(Duration.ofMillis(850))
+        assertThat(contextClosed.await(500, TimeUnit.MILLISECONDS)).isTrue()
+        verify(timeout = 500) { harness.browser.close() }
+        verify(timeout = 500) { harness.playwright.close() }
+        release.countDown()
+        harness.close()
+    }
+
     private fun rendererHarness(
         context: BrowserContext,
         nanoTimeSource: NanoTimeSource = SystemNanoTimeSource,
@@ -849,13 +905,21 @@ class CrawlFetcherTest {
         every { browser.close() } just Runs
         every { playwright.close() } just Runs
         return RendererHarness(
-            PlaywrightRenderer(client, policy, robotsService(), nanoTimeSource = nanoTimeSource) { playwright },
+            renderer = PlaywrightRenderer(client, policy, robotsService(), nanoTimeSource = nanoTimeSource) {
+                playwright
+            },
+            browser = browser,
+            playwright = playwright,
         )
     }
 
     private data class TestRoute(val path: String, val resourceType: String, val mainFrame: Boolean = true)
 
-    private data class RendererHarness(val renderer: PlaywrightRenderer) {
+    private data class RendererHarness(
+        val renderer: PlaywrightRenderer,
+        val browser: Browser,
+        val playwright: Playwright,
+    ) {
         fun close() = renderer.close()
     }
 

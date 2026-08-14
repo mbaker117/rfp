@@ -12,10 +12,18 @@ import okhttp3.OkHttpClient
 import org.jsoup.Jsoup
 import java.net.URI
 import java.time.Duration
+import java.util.concurrent.CancellationException
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.Future
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
-import java.util.concurrent.TimeUnit
-import java.util.concurrent.locks.ReentrantLock
 
 class PlaywrightRenderer(
     client: OkHttpClient,
@@ -25,10 +33,10 @@ class PlaywrightRenderer(
     private val playwrightFactory: () -> Playwright = { Playwright.create() },
 ) {
     private val transport = ValidatedHttpTransport(client, destinationValidator)
-    private val browserLock = ReentrantLock()
+    private val workerMonitor = Any()
 
-    @Volatile private var playwright: Playwright? = null
-    @Volatile private var browser: Browser? = null
+    @Volatile private var worker: RendererWorker? = null
+    @Volatile private var closed = false
 
     fun renderIfNeeded(
         fetch: FetchResult.Success,
@@ -42,22 +50,46 @@ class PlaywrightRenderer(
         if (fetch.contentType != "text/html" && fetch.contentType != "application/xhtml+xml") return fetch
         if (!parserRequiresJavaScript && meaningfulTextLength(fetch) >= meaningfulContentThreshold) return fetch
         val deadline = DeadlineBudget.start(maximumWait, nanoTimeSource)
-        val acquired = try {
-            browserLock.tryLock(deadline.remainingNanos(), TimeUnit.NANOSECONDS)
+        val selectedWorker = synchronized(workerMonitor) {
+            if (closed) return FetchResult.Rejected(FetchError.NETWORK_FAILURE)
+            worker ?: RendererWorker().also { worker = it }
+        }
+        val ticket = try {
+            selectedWorker.submit { render(selectedWorker, fetch.url, request, deadline) }
+        } catch (_: RejectedExecutionException) {
+            retire(selectedWorker)
+            return FetchResult.Rejected(if (deadline.isExpired()) FetchError.TIMEOUT else FetchError.NETWORK_FAILURE)
+        }
+        val remainingNanos = deadline.remainingNanos()
+        if (remainingNanos <= 0) {
+            timeout(selectedWorker, ticket)
+            return FetchResult.Rejected(FetchError.TIMEOUT)
+        }
+        return try {
+            val result = ticket.future.get(remainingNanos, TimeUnit.NANOSECONDS)
+            if (deadline.isExpired()) FetchResult.Rejected(FetchError.TIMEOUT) else result
+        } catch (_: TimeoutException) {
+            timeout(selectedWorker, ticket)
+            FetchResult.Rejected(FetchError.TIMEOUT)
         } catch (_: InterruptedException) {
             Thread.currentThread().interrupt()
-            false
-        }
-        if (!acquired) return FetchResult.Rejected(FetchError.TIMEOUT)
-        return try {
-            render(fetch.url, request, deadline)
-        } finally {
-            browserLock.unlock()
+            timeout(selectedWorker, ticket)
+            FetchResult.Rejected(FetchError.TIMEOUT)
+        } catch (_: CancellationException) {
+            FetchResult.Rejected(FetchError.TIMEOUT)
+        } catch (_: ExecutionException) {
+            if (deadline.isExpired()) FetchResult.Rejected(FetchError.TIMEOUT)
+            else FetchResult.Rejected(FetchError.NETWORK_FAILURE)
         }
     }
 
-    private fun render(uri: URI, request: CrawlFetchRequest, deadline: DeadlineBudget): FetchResult {
-        val context = sharedBrowser().newContext(
+    private fun render(
+        rendererWorker: RendererWorker,
+        uri: URI,
+        request: CrawlFetchRequest,
+        deadline: DeadlineBudget,
+    ): FetchResult {
+        val context = rendererWorker.sharedBrowser(deadline).newContext(
             Browser.NewContextOptions()
                 .setUserAgent(request.userAgent)
                 .setServiceWorkers(ServiceWorkerPolicy.BLOCK),
@@ -238,38 +270,167 @@ class PlaywrightRenderer(
     private fun meaningfulTextLength(fetch: FetchResult.Success): Int =
         Jsoup.parse(fetch.body.toString(Charsets.UTF_8)).text().length
 
-    private fun sharedBrowser(): Browser {
-        browser?.let { return it }
-        val newPlaywright = playwrightFactory()
-        return try {
-            newPlaywright.chromium().launch(
-                BrowserType.LaunchOptions()
-                    .setHeadless(true)
-                    .setArgs(listOf("--proxy-server=http://127.0.0.1:9", "--proxy-bypass-list=<-loopback>")),
-            ).also {
-                playwright = newPlaywright
-                browser = it
-            }
-        } catch (failure: Throwable) {
-            newPlaywright.close()
-            throw failure
+    @PreDestroy
+    fun close() {
+        val existing = synchronized(workerMonitor) {
+            closed = true
+            worker.also { worker = null }
+        }
+        existing?.closeGracefully()
+    }
+
+    private fun timeout(rendererWorker: RendererWorker, ticket: RenderTicket) {
+        if (ticket.finished.count == 0L) return
+        if (!ticket.started.get() && ticket.future.cancel(false)) return
+        retire(rendererWorker)
+        rendererWorker.abort()
+    }
+
+    private fun retire(rendererWorker: RendererWorker) {
+        synchronized(workerMonitor) {
+            if (worker === rendererWorker) worker = null
         }
     }
 
-    @PreDestroy
-    fun close() {
-        browserLock.lock()
-        try {
-            browser?.close()
-            browser = null
-            playwright?.close()
-            playwright = null
-        } finally {
-            browserLock.unlock()
+    private inner class RendererWorker {
+        private val poisoned = AtomicBoolean()
+        private val executor: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "playwright-renderer-${WORKER_IDS.incrementAndGet()}").apply { isDaemon = true }
+        }
+        private val processGuard = PlaywrightProcessGuard()
+        private var workerPlaywright: Playwright? = null
+        private var workerBrowser: Browser? = null
+
+        fun submit(task: () -> FetchResult): RenderTicket {
+            val started = AtomicBoolean()
+            val finished = CountDownLatch(1)
+            val future = executor.submit<FetchResult> {
+                started.set(true)
+                try {
+                    task()
+                } finally {
+                    if (poisoned.get()) closeLifecycle()
+                    finished.countDown()
+                }
+            }
+            return RenderTicket(future, started, finished)
+        }
+
+        fun sharedBrowser(deadline: DeadlineBudget): Browser {
+            workerBrowser?.let { return it }
+            if (deadline.isExpired()) throw TimeoutException("renderer deadline expired before browser launch")
+            val newPlaywright = playwrightFactory()
+            processGuard.capture(newPlaywright)
+            return try {
+                val launchTimeout = deadline.remaining().toMillis()
+                if (launchTimeout <= 0) throw TimeoutException("renderer deadline expired before browser launch")
+                newPlaywright.chromium().launch(
+                    BrowserType.LaunchOptions()
+                        .setHeadless(true)
+                        .setTimeout(launchTimeout.toDouble())
+                        .setArgs(listOf("--proxy-server=http://127.0.0.1:9", "--proxy-bypass-list=<-loopback>")),
+                ).also {
+                    workerPlaywright = newPlaywright
+                    workerBrowser = it
+                }
+            } catch (failure: Throwable) {
+                runCatching { newPlaywright.close() }
+                throw failure
+            }
+        }
+
+        fun abort() {
+            if (!poisoned.compareAndSet(false, true)) return
+            processGuard.terminate()
+            executor.shutdownNow()
+        }
+
+        fun closeGracefully() {
+            if (poisoned.get()) {
+                abort()
+                return
+            }
+            val cleanup = try {
+                executor.submit { closeLifecycle() }
+            } catch (_: RejectedExecutionException) {
+                processGuard.terminate()
+                return
+            }
+            try {
+                cleanup.get(CLOSE_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS)
+            } catch (_: Exception) {
+                processGuard.terminate()
+                cleanup.cancel(true)
+            } finally {
+                executor.shutdownNow()
+            }
+        }
+
+        private fun closeLifecycle() {
+            val browserToClose = workerBrowser
+            workerBrowser = null
+            runCatching { browserToClose?.close() }
+            val playwrightToClose = workerPlaywright
+            workerPlaywright = null
+            runCatching { playwrightToClose?.close() }
+        }
+    }
+
+    private data class RenderTicket(
+        val future: Future<FetchResult>,
+        val started: AtomicBoolean,
+        val finished: CountDownLatch,
+    )
+
+    private class PlaywrightProcessGuard {
+        private val baselineChildren = ProcessHandle.current().children().use { children ->
+            children.toList().mapTo(mutableSetOf()) { it.pid() }
+        }
+        private val driverProcess = AtomicReference<ProcessHandle?>()
+
+        fun capture(playwright: Playwright) {
+            val process = runCatching {
+                generateSequence(playwright.javaClass as Class<*>?) { it.superclass }
+                    .mapNotNull { type -> runCatching { type.getDeclaredField("driverProcess") }.getOrNull() }
+                    .firstOrNull()
+                    ?.also { it.trySetAccessible() }
+                    ?.get(playwright) as? Process
+            }.getOrNull()
+            process?.toHandle()?.let(driverProcess::set)
+        }
+
+        fun terminate() {
+            val captured = driverProcess.getAndSet(null)
+            val roots = if (captured != null) {
+                listOf(captured)
+            } else {
+                ProcessHandle.current().children().use { children ->
+                    children.filter { it.pid() !in baselineChildren && it.looksLikePlaywrightDriver() }.toList()
+                }
+            }
+            roots.forEach { root ->
+                val descendants = runCatching { root.descendants().toList() }.getOrDefault(emptyList())
+                descendants.asReversed().forEach { handle ->
+                    if (handle.isAlive) runCatching { handle.destroyForcibly() }
+                }
+                if (root.isAlive) runCatching { root.destroyForcibly() }
+            }
+        }
+
+        private fun ProcessHandle.looksLikePlaywrightDriver(): Boolean {
+            val info = info()
+            val commandLine = info.commandLine().orElse("")
+            val arguments = info.arguments().orElse(emptyArray()).joinToString(" ")
+            return commandLine.contains("playwright", ignoreCase = true) ||
+                commandLine.contains("run-driver", ignoreCase = true) ||
+                arguments.contains("playwright", ignoreCase = true) ||
+                arguments.contains("run-driver", ignoreCase = true)
         }
     }
 
     companion object {
+        private val WORKER_IDS = AtomicLong()
+        private val CLOSE_TIMEOUT = Duration.ofSeconds(5)
         private const val MAX_ROUTED_REQUESTS = 64L
         private const val MAX_SUBRESOURCE_BYTES = 1024L * 1024L
         private val ALLOWED_RESOURCE_TYPES = setOf("document", "script", "stylesheet", "xhr", "fetch")

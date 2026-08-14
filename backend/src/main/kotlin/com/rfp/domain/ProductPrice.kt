@@ -2,6 +2,7 @@ package com.rfp.domain
 
 import jakarta.persistence.*
 import java.math.BigDecimal
+import java.time.Instant
 import java.time.LocalDate
 
 @Entity @Table(name = "product_price")
@@ -14,5 +15,8 @@ data class ProductPrice(
     val price: BigDecimal? = null,
     val currency: String = "JOD",
     val asOf: LocalDate? = null,
-    val sourceFile: String? = null
+    val sourceFile: String? = null,
+    val sourceUrl: String? = null,
+    val extractionMethod: String? = null,
+    val observedAt: Instant? = null
 )

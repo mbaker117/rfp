@@ -22,6 +22,11 @@ data class Product(
     val attributes: String = "{}",
     val source: String,
     val isStale: Boolean = false,
+    val crawlMissCount: Int = 0,
+    val canonicalSourceUrl: String? = null,
+    val lastObservedAt: Instant? = null,
+    /** Set only by complete crawl reconciliation; never clears a manual [isStale] state. */
+    val crawlerStale: Boolean = false,
     val createdAt: Instant = Instant.now(),
     val updatedAt: Instant = Instant.now()
 )

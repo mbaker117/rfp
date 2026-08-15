@@ -7,6 +7,9 @@ import java.time.Duration
 import java.time.Instant
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Semaphore
+import java.util.concurrent.TimeUnit
 
 enum class FetchError {
     POLICY_REJECTED,
@@ -41,6 +44,10 @@ data class CrawlFetchRequest(
     val maxRedirects: Int = 5,
     val maximumDuration: Duration = Duration.ofSeconds(20),
     val previous: StoredFetchContent? = null,
+    /** Minimum milliseconds between successive requests to the same host (0 = no throttle). */
+    val throttleMs: Long = 0L,
+    /** Maximum concurrent requests to the same host (0 = unlimited). */
+    val maxConcurrency: Int = 0,
 ) {
     val scope: CrawlScope get() = CrawlScope(supplierRoot, explicitHosts)
 }
@@ -74,6 +81,12 @@ class CrawlFetcher(
 ) {
     private val transport = ValidatedHttpTransport(client, crawlPolicy, callTimeout)
 
+    /** Nanoseconds (from [nanoTimeSource]) at the last completed fetch per host. */
+    private val lastFetchNanoByHost = ConcurrentHashMap<String, Long>()
+
+    /** Per-host semaphore to cap concurrent in-flight requests. Created lazily on first use. */
+    private val hostSemaphores = ConcurrentHashMap<String, Semaphore>()
+
     fun fetch(request: CrawlFetchRequest): FetchResult {
         if (
             request.maxResponseBytes <= 0 ||
@@ -84,9 +97,37 @@ class CrawlFetcher(
             return FetchResult.Rejected(FetchError.HTTP_FAILURE)
         }
         val deadline = DeadlineBudget.start(request.maximumDuration, nanoTimeSource)
+        val host = request.url.host
 
-        var current = canonicalizer.resolveAndNormalize(request.url, request.url.toString())
-            ?: return FetchResult.Rejected(FetchError.POLICY_REJECTED)
+        // Enforce per-host concurrency ceiling before entering the expensive fetch path.
+        // A per-host Semaphore is created with the first observed maxConcurrency value.
+        val semaphore: Semaphore? = if (host != null && request.maxConcurrency > 0) {
+            hostSemaphores.computeIfAbsent(host) { Semaphore(request.maxConcurrency) }
+        } else null
+
+        if (semaphore != null) {
+            val waitMs = deadline.remaining().toMillis().coerceAtLeast(0)
+            if (!semaphore.tryAcquire(waitMs, TimeUnit.MILLISECONDS)) {
+                return timeoutRejection()
+            }
+        }
+
+        try {
+            // Enforce per-host throttle: sleep for the remaining gap since the last fetch.
+            if (host != null && request.throttleMs > 0) {
+                val lastNano = lastFetchNanoByHost[host]
+                if (lastNano != null) {
+                    val elapsedMs = TimeUnit.NANOSECONDS.toMillis(nanoTimeSource.nanoTime() - lastNano)
+                    val sleepMs = request.throttleMs - elapsedMs
+                    if (sleepMs > 0) {
+                        Thread.sleep(minOf(sleepMs, deadline.remaining().toMillis().coerceAtLeast(0)))
+                        if (deadline.isExpired()) return timeoutRejection()
+                    }
+                }
+            }
+
+            var current = canonicalizer.resolveAndNormalize(request.url, request.url.toString())
+                ?: return FetchResult.Rejected(FetchError.POLICY_REJECTED)
         val visited = mutableSetOf<URI>()
         var redirects = 0
         while (true) {
@@ -165,6 +206,12 @@ class CrawlFetcher(
                         contentHash = contentHash,
                     )
                 }
+            }
+        }
+        } finally {
+            semaphore?.release()
+            if (host != null && request.throttleMs > 0) {
+                lastFetchNanoByHost[host] = nanoTimeSource.nanoTime()
             }
         }
     }

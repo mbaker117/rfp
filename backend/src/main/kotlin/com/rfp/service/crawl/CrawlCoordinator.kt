@@ -26,8 +26,13 @@ import kotlin.random.Random
  * Outcome of a single [CrawlCoordinator.processBatch] call.
  */
 enum class BatchOutcome {
-    /** Batch finished normally; more PENDING/RETRY URLs remain. */
+    /** Batch finished normally; more PENDING URLs are immediately claimable. */
     MORE_WORK,
+    /**
+     * No PENDING URLs were claimable this batch, but RETRY URLs exist with a future
+     * [nextAttemptAt]. The caller should wait (e.g. 30 s) before calling [CrawlCoordinator.processBatch] again.
+     */
+    WAITING,
     /** All URLs are done; run has been set to COMPLETE or PARTIAL. */
     COMPLETE,
     /** Cancellation was detected; run has been set to CANCELLED. */
@@ -313,6 +318,8 @@ class CrawlCoordinator(
             url = URI(urlStr),
             supplierRoot = rootForFetch,
             explicitHosts = config.allowedHosts.toSet(),
+            throttleMs = config.throttleMs,
+            maxConcurrency = config.maxConcurrency,
         )
 
         when (val result = fetcher.fetch(fetchRequest)) {
@@ -457,9 +464,10 @@ class CrawlCoordinator(
     }
 
     private fun resolveCompletion(runId: Long, run: CrawlRun): BatchOutcome {
-        // If RETRY URLs exist (with future nextAttemptAt), come back for them
+        // If RETRY URLs exist (with future nextAttemptAt), signal the caller to wait
+        // rather than returning MORE_WORK, which would cause a tight busy-loop.
         if (urlRepo.existsByRunIdAndStatusIn(runId, listOf(CrawlUrlStatus.RETRY))) {
-            return BatchOutcome.MORE_WORK
+            return BatchOutcome.WAITING
         }
         return finishRun(run, CrawlRunStatus.COMPLETE, BatchOutcome.COMPLETE)
     }

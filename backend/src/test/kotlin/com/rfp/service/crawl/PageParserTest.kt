@@ -100,6 +100,28 @@ class PageParserTest {
         assertThat(result.documents.single().mediaType).isEqualTo("application/pdf")
     }
 
+    @Test
+    fun `resolves JSON-LD graph offer references by id`() {
+        val html = """
+            <html><head><script type="application/ld+json">
+            {"@graph":[
+              {"@type":"Product","name":"DMM-42","mpn":"DMM-42","offers":{"@id":"#offer-42"}},
+              {"@id":"#offer-42","@type":"Offer","price":"42.00","priceCurrency":"USD",
+               "url":"/products/dmm-42"}
+            ]}
+            </script></head><body>DMM-42</body></html>
+        """.trimIndent()
+
+        val page = parser.parse(success(html))
+        assertThat(page.signals.skippedEmbeddedJson).isZero()
+        assertThat(page.jsonLdProducts).describedAs("product nodes in @graph").hasSize(1)
+        val product = page.jsonLdProducts.single()
+
+        assertThat(product.offers.single().price).isEqualTo("42.00")
+        assertThat(product.offers.single().priceCurrency).isEqualTo("USD")
+        assertThat(product.offers.single().uri).isEqualTo(URI("https://example.com/products/dmm-42"))
+    }
+
     private fun successFixture(name: String): FetchResult.Success = success(resourceBytes(name).toString(Charsets.UTF_8))
 
     private fun success(html: String) = FetchResult.Success(

@@ -1,6 +1,8 @@
 package com.rfp.service.crawl
 
 import com.rfp.domain.CrawlPageType
+import com.rfp.service.LlmClient
+import com.rfp.service.LlmService
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Test
 import java.net.URI
@@ -50,6 +52,34 @@ class CrawlClassifierTest {
         assertThat(result.shouldCrawl).isFalse()
     }
 
+    @Test
+    fun `product URL with an identifier takes precedence over category pattern`() {
+        val result = classifier.classify(page(
+            url = "https://example.com/products/dmm-9000",
+            text = "DMM-9000 bench multimeter",
+        ))
+
+        assertThat(result.type).isEqualTo(CrawlPageType.PRODUCT)
+        assertThat(result.partitionKey).isEqualTo("/products")
+    }
+
+    @Test
+    fun `ambiguous page uses bounded LLM classification fallback`() {
+        val client = RecordingClient("""
+            {"schemaVersion":"1.0","type":"CATEGORY","priority":55,"shouldCrawl":true,
+             "partitionKey":"/measurement","confidence":72}
+        """.trimIndent())
+        val fallback = CrawlClassifier(LlmService(client), maxLlmCandidateCharacters = 256)
+
+        val result = fallback.classify(page(
+            url = "https://example.com/measurement",
+            text = "precision equipment ".repeat(100),
+        ))
+
+        assertThat(result.type).isEqualTo(CrawlPageType.CATEGORY)
+        assertThat(client.userMessage.length).isLessThanOrEqualTo(256)
+    }
+
     private fun page(
         url: String,
         text: String = "DMM-1000 Digital Multimeter",
@@ -77,4 +107,12 @@ class CrawlClassifierTest {
         offers = emptyList(),
         source = com.fasterxml.jackson.databind.ObjectMapper().createObjectNode(),
     )
+
+    private class RecordingClient(private val response: String) : LlmClient {
+        var userMessage: String = ""
+        override fun call(systemPrompt: String, userMessage: String): String {
+            this.userMessage = userMessage
+            return response
+        }
+    }
 }

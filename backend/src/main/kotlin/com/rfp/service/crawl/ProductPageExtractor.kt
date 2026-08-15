@@ -2,6 +2,8 @@ package com.rfp.service.crawl
 
 import com.fasterxml.jackson.databind.JsonNode
 import com.rfp.dto.ClassSchema
+import com.rfp.dto.CrawlAllowedDocument
+import com.rfp.dto.CrawlExtractionContext
 import com.rfp.dto.CrawlLlmProduct
 import com.rfp.service.LlmException
 import com.rfp.service.LlmService
@@ -25,46 +27,70 @@ class ProductPageExtractor(
     private val clock: Clock = Clock.systemUTC(),
     private val maxLlmAttempts: Int = 2,
     private val maxPromptCharacters: Int = 12_000,
+    private val maxExtractedObservations: Int = 500,
 ) {
     init {
         require(maxLlmAttempts > 0)
         require(maxPromptCharacters >= 256)
+        require(maxExtractedObservations > 0)
     }
 
     fun extract(page: ParsedPage, classes: List<ClassSchema>): List<ExtractedObservation> {
         val deterministic = buildList {
             page.jsonLdProducts.forEach { add(jsonLdObservation(page, it, classes)) }
-            page.embeddedJson.flatMap(::productObjects).forEach { node ->
+            page.embeddedJson.flatMap(::productObjects).filter { hasApiEvidence(page, it) }.forEach { node ->
                 embeddedObservation(page, node, classes)?.let(::add)
             }
-        }.distinctBy { it.identityHint.lowercase(Locale.ROOT) to it.sourceUrl }
-        if (deterministic.isNotEmpty()) return deterministic
-        if (page.visibleText.isBlank()) return emptyList()
+        }
+        enforceObservationLimit(deterministic.size)
+        if (page.visibleText.isBlank()) return deterministic
 
-        val method = if (CrawlClassifier().classify(page).type == com.rfp.domain.CrawlPageType.PRODUCT) {
+        val pageType = CrawlClassifier().classify(page).type
+        if (pageType == com.rfp.domain.CrawlPageType.PRODUCT && page.jsonLdProducts.size == 1) {
+            return deterministic
+        }
+        if (pageType == com.rfp.domain.CrawlPageType.API && deterministic.isNotEmpty()) return deterministic
+        val method = if (pageType == com.rfp.domain.CrawlPageType.PRODUCT) {
             ExtractionMethod.PRODUCT_PAGE
         } else {
             ExtractionMethod.LISTING_PAGE
         }
-        return extractWithRetries(
-            candidate = pageCandidate(page),
-            sourceUrl = page.canonicalUrl,
-            classes = classes,
-            method = method,
-            provenance = null,
-        )
+        val result = deterministic.toMutableList()
+        enforceObservationLimit(result.size)
+        candidateGroups(page.visibleText).forEach { candidate ->
+            val group = extractWithRetries(
+                candidate = candidate,
+                sourceUrl = page.canonicalUrl,
+                classes = classes,
+                method = method,
+                provenance = null,
+                allowedDocuments = page.documents,
+            )
+            enforceObservationLimit(result.size + group.size)
+            result += group
+        }
+        return result
     }
 
-    fun extract(document: ParsedDocument, classes: List<ClassSchema>): List<ExtractedObservation> =
-        document.fragments.flatMap { fragment ->
-            extractWithRetries(
-                candidate = documentCandidate(document, fragment),
-                sourceUrl = document.sourceUrl,
-                classes = classes,
-                method = ExtractionMethod.MANUFACTURER_MANUAL,
-                provenance = fragment.provenance,
-            )
+    fun extract(document: ParsedDocument, classes: List<ClassSchema>): List<ExtractedObservation> {
+        val result = mutableListOf<ExtractedObservation>()
+        document.fragments.forEach { fragment ->
+            candidateGroups(fragment.text).flatMap { candidate ->
+                extractWithRetries(
+                    candidate = candidate,
+                    sourceUrl = fragment.provenance.sourceUrl,
+                    classes = classes,
+                    method = ExtractionMethod.MANUFACTURER_MANUAL,
+                    provenance = fragment.provenance,
+                    allowedDocuments = listOf(DiscoveredDocument(fragment.provenance.sourceUrl, "manufacturer manual")),
+                )
+            }.forEach { observation ->
+                enforceObservationLimit(result.size + 1)
+                result += observation
+            }
         }
+        return result
+    }
 
     private fun jsonLdObservation(
         page: ParsedPage,
@@ -74,16 +100,23 @@ class ProductPageExtractor(
         val name = product.name?.trim()?.takeIf { it.isNotEmpty() }
             ?: throw CrawlExtractionException("JSON-LD product missing name")
         val source = requireSafeAbsolute(page.canonicalUrl.toString(), "JSON-LD source URL")
-        val offer = product.offers.firstOrNull { parsePrice(it.price) != null }
-        val price = parsePrice(offer?.price)
+        val offer = product.offers.firstNotNullOfOrNull { candidate ->
+            val amount = parsePrice(candidate.price) ?: return@firstNotNullOfOrNull null
+            val currency = validateOptionalCurrency(candidate.priceCurrency, rejectInvalid = false)
+                ?: return@firstNotNullOfOrNull null
+            ValidOffer(candidate, amount, currency)
+        }
+        val price = offer?.price
         val priceSource = offer?.uri?.let { requireSafeAbsolute(it.toString(), "JSON-LD price source URL") }
             ?: price?.let { source }
-        val currency = validateOptionalCurrency(offer?.priceCurrency, rejectInvalid = false)
+        val currency = offer?.currency
         val attributes = linkedMapOf<String, Any?>()
         product.description?.takeIf { it.isNotBlank() }?.let { attributes["description"] = it.trim() }
         product.brand?.takeIf { it.isNotBlank() }?.let { attributes["brand"] = it.trim() }
         product.sku?.takeIf { it.isNotBlank() }?.let { attributes["sku"] = it.trim() }
-        page.documents.firstOrNull()?.uri?.let { attributes["manualLink"] = it.toString() }
+        associatedManual(page.documents, product.mpn ?: product.sku ?: name)?.let {
+            attributes["manualLink"] = it.uri.toString()
+        }
         val method = ExtractionMethod.JSON_LD
         val fieldSource = FieldSource(source, method)
         val sources = mutableMapOf<String, FieldSource>()
@@ -121,15 +154,17 @@ class ProductPageExtractor(
             ?: requireSafeAbsolute(page.canonicalUrl.toString(), "page source URL")
         val priceNode = node.firstNode("price", "amount", "currentPrice")
             ?: node.path("offers").takeIf { it.isObject }?.firstNode("price", "amount")
-        val price = parsePrice(priceNode?.asText())
+        val parsedPrice = parsePrice(priceNode?.asText())
+        val currencyRaw = node.firstText("currency", "priceCurrency")
+            ?: node.path("offers").takeIf { it.isObject }?.firstText("currency", "priceCurrency")
+        val parsedCurrency = validateOptionalCurrency(currencyRaw, rejectInvalid = false)
+        val price = parsedPrice.takeIf { parsedCurrency != null }
+        val currency = parsedCurrency.takeIf { price != null }
         val priceSource = price?.let {
             node.firstText("priceSourceUrl", "offerUrl")
                 ?.let { raw -> requireSafeAbsolute(raw, "embedded price source URL") }
                 ?: source
         }
-        val currencyRaw = node.firstText("currency", "priceCurrency")
-            ?: node.path("offers").takeIf { it.isObject }?.firstText("currency", "priceCurrency")
-        val currency = validateOptionalCurrency(currencyRaw, rejectInvalid = false)
         val attributes = linkedMapOf<String, Any?>()
         node.firstText("description", "summary")?.let { attributes["description"] = it }
         node.firstText("manualLink", "manualUrl", "datasheet")?.let {
@@ -165,14 +200,25 @@ class ProductPageExtractor(
         classes: List<ClassSchema>,
         method: ExtractionMethod,
         provenance: DocumentProvenance?,
+        allowedDocuments: List<DiscoveredDocument>,
     ): List<ExtractedObservation> {
         var input = candidate.take(maxPromptCharacters)
         var lastFailure: Exception? = null
         repeat(maxLlmAttempts) { attempt ->
             try {
-                return llmService.extractCrawlProducts(input, classes).map {
-                    validateLlmProduct(it, sourceUrl, method, provenance)
+                val context = CrawlExtractionContext(
+                    sourceUrl = sourceUrl.toString(),
+                    allowedDocuments = allowedDocuments.map { CrawlAllowedDocument(it.uri.toString(), it.label) },
+                    page = provenance?.page,
+                    sheet = provenance?.sheet,
+                    section = provenance?.section,
+                )
+                val products = llmService.extractCrawlProducts(input, classes, context)
+                val validated = products.mapNotNull {
+                    runCatching { validateLlmProduct(it, sourceUrl, method, provenance, allowedDocuments) }.getOrNull()
                 }
+                if (products.isNotEmpty() && validated.isEmpty()) throw CrawlExtractionException("No valid observations")
+                return validated
             } catch (failure: LlmException) {
                 lastFailure = failure
             } catch (failure: CrawlExtractionException) {
@@ -191,14 +237,11 @@ class ProductPageExtractor(
         expectedSource: URI,
         method: ExtractionMethod,
         provenance: DocumentProvenance?,
+        allowedDocuments: List<DiscoveredDocument>,
     ): ExtractedObservation {
         val name = product.name?.trim()?.takeIf { it.isNotEmpty() }
             ?: throw CrawlExtractionException("LLM product missing name")
-        val source = requireSafeAbsolute(product.sourceUrl, "LLM source URL")
-        val canonicalExpectedSource = requireSafeAbsolute(expectedSource.toString(), "expected source URL")
-        if (method == ExtractionMethod.MANUFACTURER_MANUAL && source != canonicalExpectedSource) {
-            throw CrawlExtractionException("Manual observation source does not match parsed document")
-        }
+        val source = requireSafeAbsolute(expectedSource.toString(), "expected source URL")
         val identity = product.identityHint?.trim()?.takeIf { it.isNotEmpty() }
             ?: product.mpn?.trim()?.takeIf { it.isNotEmpty() } ?: name
         val attributes = product.attributes.toMutableMap()
@@ -207,15 +250,24 @@ class ProductPageExtractor(
         val manualLink = attributes["manualLink"]
         if (manualLink != null) {
             if (manualLink !is String) throw CrawlExtractionException("Manual link must be a string")
-            attributes["manualLink"] = requireSafeAbsolute(manualLink, "LLM manual URL").toString()
+            val boundManual = if (method == ExtractionMethod.MANUFACTURER_MANUAL) {
+                allowedDocuments.singleOrNull()
+            } else {
+                val requested = runCatching { requireSafeAbsolute(manualLink, "LLM manual URL") }.getOrNull()
+                allowedDocuments.firstOrNull { it.uri == requested && matchesIdentity(it, identity) }
+            }
+            if (boundManual == null) attributes.remove("manualLink")
+            else attributes["manualLink"] = boundManual.uri.toString()
         }
         val confidence = product.confidence?.takeIf { it in 0..100 }
             ?: throw CrawlExtractionException("Invalid extraction confidence")
+        if (product.price != null && product.price.signum() < 0) throw CrawlExtractionException("Negative price")
         val currency = validateOptionalCurrency(product.currency, rejectInvalid = true)
+        if (product.price != null && currency == null) throw CrawlExtractionException("Priced observation missing currency")
         val priceSource = when {
             product.price == null && product.priceSourceUrl == null -> null
             product.price == null -> throw CrawlExtractionException("Price source supplied without a price")
-            else -> requireSafeAbsolute(product.priceSourceUrl, "LLM price source URL")
+            else -> source
         }
         val fieldSource = FieldSource(
             sourceUrl = source,
@@ -248,19 +300,13 @@ class ProductPageExtractor(
         )
     }
 
-    private fun pageCandidate(page: ParsedPage): String = buildString {
-        appendLine("sourceUrl=${page.canonicalUrl}")
-        page.title?.let { appendLine("title=${it.take(500)}") }
-        append(page.visibleText)
-    }.take(maxPromptCharacters)
-
-    private fun documentCandidate(document: ParsedDocument, fragment: DocumentFragment): String = buildString {
-        appendLine("sourceUrl=${document.sourceUrl}")
-        appendLine("documentPage=${fragment.provenance.page ?: ""}")
-        appendLine("documentSheet=${fragment.provenance.sheet ?: ""}")
-        appendLine("documentSection=${fragment.provenance.section ?: ""}")
-        append(fragment.text)
-    }.take(maxPromptCharacters)
+    private fun candidateGroups(text: String): List<String> {
+        val logicalBlocks = text.split(PRODUCT_BOUNDARY).map(String::trim).filter(String::isNotEmpty)
+        return logicalBlocks.flatMap { block ->
+            if (block.length <= maxPromptCharacters) listOf(block)
+            else block.chunked(maxPromptCharacters)
+        }
+    }
 
     private fun smallerCandidate(input: String, attempt: Int): String {
         val blocks = input.split(Regex("\\n\\s*\\n|(?=\\n(?:Product|Model|SKU|MPN)[:#\\s])", RegexOption.IGNORE_CASE))
@@ -295,6 +341,25 @@ class ProductPageExtractor(
         runCatching { BigDecimal(it) }.getOrNull()?.takeIf { amount -> amount.signum() >= 0 }
     }
 
+    private fun hasApiEvidence(page: ParsedPage, node: JsonNode): Boolean {
+        if (API_PATH.containsMatchIn(page.canonicalUrl.path.orEmpty())) return true
+        return listOf("url", "sourceUrl", "priceSourceUrl", "offerUrl").any { field ->
+            node.firstText(field)?.let { value ->
+                runCatching { URI(value).path.orEmpty() }.getOrNull()?.let(API_PATH::containsMatchIn) == true
+            } == true
+        }
+    }
+
+    private fun associatedManual(documents: List<DiscoveredDocument>, identity: String): DiscoveredDocument? =
+        documents.firstOrNull { matchesIdentity(it, identity) }
+
+    private fun matchesIdentity(document: DiscoveredDocument, identity: String): Boolean {
+        val token = identity.lowercase(Locale.ROOT).replace(NON_IDENTITY, "")
+        if (token.length < 3) return false
+        val documentHint = "${document.label} ${document.uri.path}".lowercase(Locale.ROOT).replace(NON_IDENTITY, "")
+        return documentHint.contains(token)
+    }
+
     private fun validateOptionalCurrency(raw: String?, rejectInvalid: Boolean): String? {
         val candidate = raw?.trim()?.uppercase(Locale.ROOT)?.takeIf { it.isNotEmpty() } ?: return null
         val valid = candidate.length == 3 && runCatching { Currency.getInstance(candidate) }.isSuccess
@@ -312,7 +377,21 @@ class ProductPageExtractor(
             ?: throw CrawlExtractionException("$label is unsafe")
     }
 
+    private fun enforceObservationLimit(count: Int) {
+        if (count > maxExtractedObservations) throw CrawlExtractionException("Page observation limit exceeded")
+    }
+
     private fun matchClass(name: String, classes: List<ClassSchema>): String? = classes
         .firstOrNull { name.contains(it.name, ignoreCase = true) }
         ?.name
+
+    private data class ValidOffer(val offer: ProductOffer, val price: BigDecimal, val currency: String) {
+        val uri: URI? get() = offer.uri
+    }
+
+    private companion object {
+        val PRODUCT_BOUNDARY = Regex("\\n\\s*\\n|(?=\\n(?:Product|Model)[:#\\s])", RegexOption.IGNORE_CASE)
+        val API_PATH = Regex("/(?:api|graphql)(?:/|$)", RegexOption.IGNORE_CASE)
+        val NON_IDENTITY = Regex("[^a-z0-9]")
+    }
 }

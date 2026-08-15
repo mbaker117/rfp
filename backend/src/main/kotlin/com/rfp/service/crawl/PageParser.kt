@@ -60,7 +60,10 @@ class PageParser(
             )
         }
         val products = jsonLdRoots.flatMap { root ->
-            root.productNodes().map { it.toProduct(referenceBase) }
+            val byId = root.allObjects().mapNotNull { node ->
+                node.textValue("@id")?.let { it to node }
+            }.toMap()
+            root.productNodes().map { it.toProduct(referenceBase, byId) }
         }
         val pagination = document.select("a[href]")
             .filter(::isPaginationLink)
@@ -104,10 +107,11 @@ class PageParser(
         return runCatching { objectMapper.readTree(json) }
     }
 
-    private fun JsonNode.toProduct(pageUrl: URI): JsonLdProduct {
+    private fun JsonNode.toProduct(pageUrl: URI, nodesById: Map<String, JsonNode>): JsonLdProduct {
         val offerNodes = when {
-            path("offers").isArray -> path("offers").toList()
-            path("offers").isObject -> listOf(path("offers"))
+            path("offers").isArray -> path("offers").toList().map { it.resolveReference(nodesById) }
+            path("offers").isObject -> listOf(path("offers").resolveReference(nodesById))
+            path("offers").isTextual -> listOfNotNull(nodesById[path("offers").asText()])
             else -> emptyList()
         }
         return JsonLdProduct(
@@ -134,8 +138,16 @@ class PageParser(
         )
     }
 
+    private fun JsonNode.resolveReference(nodesById: Map<String, JsonNode>): JsonNode =
+        textValue("@id")?.let(nodesById::get) ?: this
+
+    private fun JsonNode.allObjects(): List<JsonNode> = buildList {
+        if (isObject) add(this@allObjects)
+        if (isContainerNode) elements().forEachRemaining { addAll(it.allObjects()) }
+    }
+
     private fun JsonNode.productNodes(): List<JsonNode> = buildList {
-        if (isArray) forEach { addAll(it.productNodes()) }
+        if (isArray) this@productNodes.forEach { addAll(it.productNodes()) }
         if (isObject) {
             val types = path("@type").let { type ->
                 when {

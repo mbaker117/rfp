@@ -57,3 +57,16 @@ data class CrawlLlmProduct(
     val sourceUrl: String?,
     val confidence: Int?,
 )
+
+data class CrawlAllowedDocument(
+    val url: String,
+    val label: String,
+)
+
+data class CrawlExtractionContext(
+    val sourceUrl: String,
+    val allowedDocuments: List<CrawlAllowedDocument> = emptyList(),
+    val page: Int? = null,
+    val sheet: String? = null,
+    val section: String? = null,
+)

@@ -4,7 +4,7 @@ import com.rfp.service.LlmClient
 import com.rfp.service.LlmService
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Test
-import org.springframework.context.annotation.AnnotationConfigApplicationContext
+import org.springframework.boot.test.context.runner.ApplicationContextRunner
 import java.net.URI
 
 class CrawlExtractionConfigurationTest {
@@ -20,26 +20,29 @@ class CrawlExtractionConfigurationTest {
         val client = object : LlmClient {
             override fun call(systemPrompt: String, userMessage: String): String = responses.removeFirst()
         }
-        AnnotationConfigApplicationContext().use { context ->
-            context.beanFactory.registerSingleton("llmService", LlmService(client))
-            context.register(ProductPageExtractor::class.java, CrawlExtractionConfiguration::class.java)
-            context.refresh()
+        ApplicationContextRunner()
+            .withPropertyValues("spring.main.allow-bean-definition-overriding=false")
+            .withBean(LlmService::class.java, { LlmService(client) })
+            .withUserConfiguration(ProductPageExtractor::class.java, CrawlExtractionConfiguration::class.java)
+            .run { context ->
+                assertThat(context).hasNotFailed()
+                assertThat(context).hasSingleBean(ProductPageExtractor::class.java)
 
-            val page = ParsedPage(
-                title = null,
-                canonicalUrl = URI("https://example.com/measurement"),
-                visibleText = "precision instrument SAFE-1",
-                links = emptyList(),
-                jsonLdProducts = emptyList(),
-                embeddedJson = emptyList(),
-                pagination = emptyList(),
-                documents = emptyList(),
-                signals = PageSignals(false, false, 0),
-            )
-            val observations = context.getBean(ProductPageExtractor::class.java).extract(page, emptyList())
+                val page = ParsedPage(
+                    title = null,
+                    canonicalUrl = URI("https://example.com/measurement"),
+                    visibleText = "precision instrument SAFE-1",
+                    links = emptyList(),
+                    jsonLdProducts = emptyList(),
+                    embeddedJson = emptyList(),
+                    pagination = emptyList(),
+                    documents = emptyList(),
+                    signals = PageSignals(false, false, 0),
+                )
+                val observations = context.getBean(ProductPageExtractor::class.java).extract(page, emptyList())
 
-            assertThat(context.getBean(CrawlClassifier::class.java)).isNotNull
-            assertThat(observations.single().mpn).isEqualTo("SAFE-1")
-        }
+                assertThat(context.getBean(CrawlClassifier::class.java)).isNotNull
+                assertThat(observations.single().mpn).isEqualTo("SAFE-1")
+            }
     }
 }

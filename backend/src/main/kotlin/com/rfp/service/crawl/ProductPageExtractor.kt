@@ -18,7 +18,21 @@ typealias ExtractedObservation = com.rfp.dto.ExtractedObservation
 typealias ExtractionMethod = com.rfp.dto.ExtractionMethod
 typealias FieldSource = com.rfp.dto.FieldSource
 
-class CrawlExtractionException(message: String, cause: Throwable? = null) : RuntimeException(message, cause)
+open class CrawlExtractionException(message: String, cause: Throwable? = null) : RuntimeException(message, cause)
+
+private class CrawlExtractionBudgetException(limit: Int) :
+    CrawlExtractionException("Terminal product extraction error: LLM call budget of $limit exhausted")
+
+private class LlmCallBudget(private val limit: Int) {
+    private var used = 0
+
+    fun beforeCall() {
+        if (used >= limit) throw CrawlExtractionBudgetException(limit)
+        used++
+    }
+
+    fun isExhausted(): Boolean = used >= limit
+}
 
 @Service
 class ProductPageExtractor(
@@ -38,6 +52,7 @@ class ProductPageExtractor(
     }
 
     fun extract(page: ParsedPage, classes: List<ClassSchema>): List<ExtractedObservation> {
+        val budget = LlmCallBudget(maxLlmAttempts)
         val deterministic = buildList {
             page.jsonLdProducts.forEach { product ->
                 try {
@@ -57,8 +72,10 @@ class ProductPageExtractor(
         enforceObservationLimit(deterministic.size)
         if (page.visibleText.isBlank()) return deterministic
 
-        val pageType = classifier.classify(page).type
-        if (pageType == com.rfp.domain.CrawlPageType.PRODUCT && page.jsonLdProducts.size == 1) {
+        val pageType = classifier.classify(page, budget::beforeCall).type
+        if (pageType == com.rfp.domain.CrawlPageType.PRODUCT && page.jsonLdProducts.size == 1 &&
+            deterministic.any { it.method == ExtractionMethod.JSON_LD }
+        ) {
             return deterministic
         }
         if (pageType == com.rfp.domain.CrawlPageType.API && deterministic.isNotEmpty()) return deterministic
@@ -77,6 +94,7 @@ class ProductPageExtractor(
                 method = method,
                 provenance = null,
                 allowedDocuments = page.documents,
+                budget = budget,
             )
             enforceObservationLimit(result.size + group.size)
             result += group
@@ -85,6 +103,9 @@ class ProductPageExtractor(
     }
 
     fun extract(document: ParsedDocument, classes: List<ClassSchema>): List<ExtractedObservation> {
+        val trustedIdentity = document.linkedProductIdentity?.trim()?.takeIf(String::isNotEmpty)
+            ?: throw CrawlExtractionException("Manual document lacks trusted linked product identity")
+        val budget = LlmCallBudget(maxLlmAttempts)
         val result = mutableListOf<ExtractedObservation>()
         document.fragments.forEach { fragment ->
             candidateGroups(fragment.text).flatMap { candidate ->
@@ -97,8 +118,9 @@ class ProductPageExtractor(
                     allowedDocuments = listOf(DiscoveredDocument(
                         fragment.provenance.sourceUrl,
                         "manufacturer manual",
-                        linkedProductIdentity = document.linkedProductIdentity,
+                        linkedProductIdentity = trustedIdentity,
                     )),
+                    budget = budget,
                 )
             }.forEach { observation ->
                 enforceObservationLimit(result.size + 1)
@@ -217,6 +239,7 @@ class ProductPageExtractor(
         method: ExtractionMethod,
         provenance: DocumentProvenance?,
         allowedDocuments: List<DiscoveredDocument>,
+        budget: LlmCallBudget,
     ): List<ExtractedObservation> = extractGroup(
         candidate = candidate,
         sourceUrl = sourceUrl,
@@ -224,7 +247,7 @@ class ProductPageExtractor(
         method = method,
         provenance = provenance,
         allowedDocuments = allowedDocuments,
-        remainingDepth = maxLlmAttempts,
+        budget = budget,
     )
 
     private fun extractGroup(
@@ -234,7 +257,7 @@ class ProductPageExtractor(
         method: ExtractionMethod,
         provenance: DocumentProvenance?,
         allowedDocuments: List<DiscoveredDocument>,
-        remainingDepth: Int,
+        budget: LlmCallBudget,
     ): List<ExtractedObservation> {
         try {
             val context = CrawlExtractionContext(
@@ -247,23 +270,25 @@ class ProductPageExtractor(
                 section = provenance?.section,
                 linkedProductIdentity = allowedDocuments.singleOrNull()?.linkedProductIdentity,
             )
+            budget.beforeCall()
             val products = llmService.extractCrawlProducts(candidate, classes, context)
             val validated = products.mapNotNull {
                 runCatching { validateLlmProduct(it, sourceUrl, method, provenance, allowedDocuments) }.getOrNull()
             }
             if (products.isNotEmpty() && validated.isEmpty()) throw CrawlExtractionException("No valid observations")
             return validated
+        } catch (exhausted: CrawlExtractionBudgetException) {
+            throw exhausted
         } catch (failure: Exception) {
             if (failure !is LlmException && failure !is CrawlExtractionException) throw failure
-            if (remainingDepth <= 1) {
-                throw CrawlExtractionException(
-                    "Terminal product extraction error after retry depth $maxLlmAttempts for $sourceUrl",
-                    failure,
-                )
-            }
+            if (budget.isExhausted()) throw CrawlExtractionBudgetException(maxLlmAttempts)
             val observations = mutableListOf<ExtractedObservation>()
             val failures = mutableListOf<CrawlExtractionException>()
-            reducedCandidates(candidate).forEach { subgroup ->
+            val subgroups = reducedCandidates(candidate)
+            if (subgroups.size == 1 && subgroups.single() == candidate) {
+                throw CrawlExtractionException("Terminal malformed extraction leaf for $sourceUrl", failure)
+            }
+            subgroups.forEach { subgroup ->
                 try {
                     observations += extractGroup(
                         subgroup,
@@ -272,14 +297,16 @@ class ProductPageExtractor(
                         method,
                         provenance,
                         allowedDocuments,
-                        remainingDepth - 1,
+                        budget,
                     )
+                } catch (exhausted: CrawlExtractionBudgetException) {
+                    throw exhausted
                 } catch (terminal: CrawlExtractionException) {
                     failures += terminal
                 }
             }
             if (failures.isNotEmpty()) throw CrawlExtractionException(
-                "Terminal product extraction error after retry depth $maxLlmAttempts for $sourceUrl",
+                "Terminal product extraction error for malformed leaf at $sourceUrl",
                 failures.last(),
             )
             return observations
@@ -419,12 +446,8 @@ class ProductPageExtractor(
     private fun matchesIdentity(document: DiscoveredDocument, identity: String): Boolean {
         val token = normalizeIdentity(identity)
         if (token.length < 3) return false
-        document.linkedProductIdentity?.let { linked ->
-            return normalizeIdentity(linked) == token
-        }
-        return IDENTITY_TOKEN.findAll("${document.label} ${document.uri.path}")
-            .map { it.value.lowercase(Locale.ROOT).replace(NON_IDENTITY, "") }
-            .any { it == token }
+        val linked = document.linkedProductIdentity ?: return false
+        return normalizeIdentity(linked) == token
     }
 
     private fun normalizeIdentity(identity: String): String =
@@ -463,6 +486,5 @@ class ProductPageExtractor(
         val PRODUCT_BOUNDARY = Regex("\\n\\s*\\n|(?=\\n(?:Product|Model)[:#\\s])", RegexOption.IGNORE_CASE)
         val API_PATH = Regex("/(?:api|graphql)(?:/|$)", RegexOption.IGNORE_CASE)
         val NON_IDENTITY = Regex("[^a-z0-9]")
-        val IDENTITY_TOKEN = Regex("[a-z0-9]+(?:[-_.][a-z0-9]+)*", RegexOption.IGNORE_CASE)
     }
 }

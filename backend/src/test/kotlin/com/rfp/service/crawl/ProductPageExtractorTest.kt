@@ -100,7 +100,7 @@ class ProductPageExtractorTest {
             text = "Product: DMM-200 Digital Multimeter\nMPN: DMM-200\nPrice: 45.00 USD",
         )
 
-        val observations = extractor(client).extract(page, emptyList())
+        val observations = extractor(client, maxAttempts = 3).extract(page, emptyList())
 
         assertThat(observations).hasSize(1)
         assertThat(observations.single().mpn).isEqualTo("DMM-200")
@@ -168,7 +168,7 @@ class ProductPageExtractorTest {
             text = "SKU: MTR-A meter A\nSKU: MTR-B meter B",
         )
 
-        val observations = extractor(client, maxAttempts = 2).extract(page, emptyList())
+        val observations = extractor(client, maxAttempts = 3).extract(page, emptyList())
 
         assertThat(observations.map { it.mpn }).containsExactly("MTR-A", "MTR-B")
         assertThat(client.messages).hasSize(3)
@@ -187,7 +187,7 @@ class ProductPageExtractorTest {
             "Product: MTR-A\nMPN: MTR-A\n\nProduct: MTR-B\nMPN: MTR-B",
         )
 
-        val observations = extractor(client, maxPromptCharacters = 256).extract(page, emptyList())
+        val observations = extractor(client, maxAttempts = 4, maxPromptCharacters = 256).extract(page, emptyList())
 
         assertThat(observations.map { it.mpn }).containsExactly("MTR-A", "MTR-B")
     }
@@ -199,7 +199,21 @@ class ProductPageExtractorTest {
 
         assertThatThrownBy { extractor(client, maxAttempts = 2).extract(page, emptyList()) }
             .isInstanceOf(CrawlExtractionException::class.java)
-            .hasMessageContaining("retry depth 2")
+            .hasMessageContaining("LLM call budget of 2")
+        assertThat(client.messages).hasSize(2)
+    }
+
+    @Test
+    fun `LLM attempt ceiling is shared across every page group and retry branch`() {
+        val client = RecordingLlmClient(*Array(20) { "not-json" })
+        val page = emptyPage(
+            "https://example.com/catalog",
+            "Product: MTR-A\n\nProduct: MTR-B\n\nProduct: MTR-C\n\nProduct: MTR-D",
+        )
+
+        assertThatThrownBy { extractor(client, maxAttempts = 3).extract(page, emptyList()) }
+            .isInstanceOf(CrawlExtractionException::class.java)
+            .hasMessageContaining("LLM call budget of 3")
         assertThat(client.messages).hasSize(3)
     }
 
@@ -210,6 +224,7 @@ class ProductPageExtractorTest {
             price = null,
             currency = null,
             manualLink = "https://example.com/manuals/dmm-300.pdf",
+            identity = "DMM-300",
         ))
         val document = ParsedDocument(
             sourceUrl = URI("https://example.com/manuals/dmm-300.pdf"),
@@ -218,6 +233,7 @@ class ProductPageExtractorTest {
                 "DMM-300 True RMS. Maximum voltage 1000 V.",
                 DocumentProvenance(URI("https://example.com/manuals/dmm-300.pdf"), page = 7),
             )),
+            linkedProductIdentity = "DMM-300",
         )
 
         val observation = extractor(client).extract(document, emptyList()).single()
@@ -239,6 +255,7 @@ class ProductPageExtractorTest {
             price = null,
             currency = null,
             manualLink = fragmentSource.toString(),
+            identity = "DMM-300",
         ))
         val document = ParsedDocument(
             sourceUrl = URI("https://example.com/manuals/dmm-300.pdf"),
@@ -247,6 +264,7 @@ class ProductPageExtractorTest {
                 "DMM-300 maximum voltage 1000 V",
                 DocumentProvenance(fragmentSource, page = 7),
             )),
+            linkedProductIdentity = "DMM-300",
         )
 
         val observation = extractor(client).extract(document, emptyList()).single()
@@ -277,8 +295,25 @@ class ProductPageExtractorTest {
 
         assertThatThrownBy { extractor(client, maxAttempts = 1).extract(document, emptyList()) }
             .isInstanceOf(CrawlExtractionException::class.java)
-            .hasMessageContaining("retry depth 1")
+            .hasMessageContaining("LLM call budget of 1")
         assertThat(client.messages.single()).contains("DMM-10")
+    }
+
+    @Test
+    fun `manual extraction without trusted discovered-product linkage is terminal`() {
+        val source = URI("https://example.com/manuals/dmm-300.pdf")
+        val document = ParsedDocument(
+            sourceUrl = source,
+            contentType = "application/pdf",
+            fragments = listOf(DocumentFragment(
+                "DMM-300 specifications",
+                DocumentProvenance(source, page = 1),
+            )),
+        )
+
+        assertThatThrownBy { extractor(RecordingLlmClient(validLlmJson(source.toString()))).extract(document, emptyList()) }
+            .isInstanceOf(CrawlExtractionException::class.java)
+            .hasMessageContaining("trusted linked product identity")
     }
 
     @Test
@@ -309,7 +344,7 @@ class ProductPageExtractorTest {
         assertThatThrownBy {
             extractor(client).extract(emptyPage("https://example.com/catalog", "DMM-200"), emptyList())
         }.isInstanceOf(CrawlExtractionException::class.java)
-            .hasMessageContaining("retry depth 2")
+            .hasMessageContaining("LLM call budget of 2")
     }
 
     @Test
@@ -343,7 +378,7 @@ class ProductPageExtractorTest {
         )
         val page = emptyPage("https://example.com/measurement", "precision instrument MTR-OPEN")
 
-        val observations = extractor(client, maxAttempts = 1).extract(page, emptyList())
+        val observations = extractor(client, maxAttempts = 2).extract(page, emptyList())
 
         assertThat(observations.single().mpn).isEqualTo("MTR-OPEN")
         assertThat(client.systemPrompts).hasSize(2)
@@ -358,7 +393,12 @@ class ProductPageExtractorTest {
             JsonLdProduct(identity, "description", identity, null, null, emptyList(), ObjectMapper().createObjectNode())
         }
         val page = emptyPage(source.toString(), products = products, documents = listOf(
-            DiscoveredDocument(URI("https://example.com/manuals/DMM-A.pdf"), "DMM-A manual", "application/pdf"),
+            DiscoveredDocument(
+                URI("https://example.com/manuals/DMM-A.pdf"),
+                "DMM-A manual",
+                "application/pdf",
+                linkedProductIdentity = "DMM-A",
+            ),
         ))
 
         val observations = extractor(RecordingLlmClient()).extract(page, emptyList())
@@ -390,6 +430,53 @@ class ProductPageExtractorTest {
         assertThat(observations.single { it.mpn == "DMM-1" }.attributes["manualLink"]).isNull()
         assertThat(observations.single { it.mpn == "DMM-10" }.attributes["manualLink"])
             .isEqualTo(document.uri.toString())
+    }
+
+    @Test
+    fun `manual filename is not treated as authoritative product linkage`() {
+        val source = URI("https://example.com/catalog")
+        val product = JsonLdProduct(
+            "DMM-10", "description", "DMM-10", null, null, emptyList(), ObjectMapper().createObjectNode(),
+        )
+        val unassociated = DiscoveredDocument(
+            URI("https://example.com/manuals/DMM-10.pdf"),
+            "DMM-10 manual",
+            "application/pdf",
+        )
+
+        val observation = extractor(RecordingLlmClient()).extract(
+            emptyPage(source.toString(), products = listOf(product), documents = listOf(unassociated)),
+            emptyList(),
+        ).single()
+
+        assertThat(observation.attributes["manualLink"]).isNull()
+    }
+
+    @Test
+    fun `single malformed JSON-LD product falls back to page LLM extraction`() {
+        val malformed = JsonLdProduct(
+            name = null,
+            description = "missing name",
+            mpn = "BAD-1",
+            sku = null,
+            brand = null,
+            offers = emptyList(),
+            source = ObjectMapper().createObjectNode(),
+        )
+        val client = RecordingLlmClient(validLlmJson("https://example.com/products/bad-1", identity = "RECOVERED-1"))
+
+        val observations = extractor(client).extract(
+            emptyPage(
+                "https://example.com/products/bad-1",
+                "Recovered meter MPN RECOVERED-1",
+                products = listOf(malformed),
+            ),
+            emptyList(),
+        )
+
+        assertThat(observations.single().mpn).isEqualTo("RECOVERED-1")
+        assertThat(observations.single().method).isEqualTo(ExtractionMethod.PRODUCT_PAGE)
+        assertThat(client.messages).hasSize(1)
     }
 
     @Test

@@ -79,6 +79,9 @@ class CatalogDocumentParser(
 
     fun parse(bytes: ByteArray, contentType: String, sourceUrl: URI): ParsedDocument =
         worker.parse(bytes, contentType, sourceUrl)
+
+    fun parse(bytes: ByteArray, contentType: String, document: DiscoveredDocument): ParsedDocument =
+        worker.parse(bytes, contentType, document.uri, document.linkedProductIdentity)
 }
 
 internal class CatalogDocumentParserCore(

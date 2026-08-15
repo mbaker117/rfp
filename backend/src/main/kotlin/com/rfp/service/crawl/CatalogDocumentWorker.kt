@@ -242,7 +242,12 @@ internal class CatalogDocumentWorkerClient(
         require(maxWorkerOutputBytes in 64..256L * 1024 * 1024)
     }
 
-    fun parse(bytes: ByteArray, contentType: String, sourceUrl: URI): ParsedDocument {
+    fun parse(
+        bytes: ByteArray,
+        contentType: String,
+        sourceUrl: URI,
+        linkedProductIdentity: String? = null,
+    ): ParsedDocument {
         if (bytes.size > settings.maxDocumentBytes) reject(DocumentRejectionReason.OVERSIZED)
         val started = System.nanoTime()
         val lease = try {
@@ -312,7 +317,7 @@ internal class CatalogDocumentWorkerClient(
                 sourceUrl,
                 settings.maxSections,
                 maxWorkerOutputBytes,
-            )
+            ).copy(linkedProductIdentity = linkedProductIdentity)
         } catch (rejection: CatalogDocumentRejectedException) {
             throw rejection
         } catch (interrupted: InterruptedException) {

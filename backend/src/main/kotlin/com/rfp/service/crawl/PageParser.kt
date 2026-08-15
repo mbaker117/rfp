@@ -97,14 +97,7 @@ class PageParser(
             .distinctBy { it.uri }
         val visibleText = document.body().text().normalizedWhitespace()
         val productBlocks = document.select(PRODUCT_BLOCK_SELECTOR)
-        val textBlocks = productBlocks
-            .filter { candidate ->
-                productBlocks.none { nested -> nested !== candidate && nested.parents().contains(candidate) }
-            }
-            .map { it.text().normalizedWhitespace() }
-            .filter(String::isNotEmpty)
-            .distinct()
-            .ifEmpty { listOfNotNull(visibleText.takeIf(String::isNotEmpty)) }
+        val textBlocks = semanticTextBlocks(document.body(), productBlocks, visibleText)
 
         return ParsedPage(
             title = document.title().trim().ifEmpty { null },
@@ -122,6 +115,36 @@ class PageParser(
             ),
             textBlocks = textBlocks,
         )
+    }
+
+    private fun semanticTextBlocks(body: Element, productBlocks: List<Element>, visibleText: String): List<String> {
+        val productElements = productBlocks.toSet()
+        val leafProducts = productBlocks.filter { candidate ->
+            productBlocks.none { nested -> nested !== candidate && nested.parents().contains(candidate) }
+        }.toSet()
+        if (leafProducts.isEmpty()) return listOfNotNull(visibleText.takeIf(String::isNotEmpty))
+
+        val blocks = mutableListOf<String>()
+        fun visit(element: Element) {
+            if (element in leafProducts) {
+                element.text().normalizedWhitespace().takeIf(String::isNotEmpty)?.let(blocks::add)
+                return
+            }
+            val containedProducts = leafProducts.filter { product -> product.parents().contains(element) }
+            if (element in productElements && containedProducts.size == 1) {
+                element.text().normalizedWhitespace().takeIf(String::isNotEmpty)?.let(blocks::add)
+                return
+            }
+            val containsProduct = containedProducts.isNotEmpty()
+            if (!containsProduct) {
+                element.text().normalizedWhitespace().takeIf(String::isNotEmpty)?.let(blocks::add)
+                return
+            }
+            element.ownText().normalizedWhitespace().takeIf(String::isNotEmpty)?.let(blocks::add)
+            element.children().forEach(::visit)
+        }
+        visit(body)
+        return blocks.distinct().ifEmpty { listOfNotNull(visibleText.takeIf(String::isNotEmpty)) }
     }
 
     private fun parseBoundedJson(json: String): Result<JsonNode> {

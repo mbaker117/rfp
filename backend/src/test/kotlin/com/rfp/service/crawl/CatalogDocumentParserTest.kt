@@ -46,6 +46,21 @@ class CatalogDocumentParserTest {
     }
 
     @Test
+    fun `carries trusted discovered product identity through worker parsing`() {
+        val discovered = DiscoveredDocument(
+            uri = source.resolve("manual.pdf"),
+            label = "DMM-1000 manual",
+            mediaType = "application/pdf",
+            linkedProductIdentity = "DMM-1000",
+        )
+
+        val parsed = parser.parse(resourceBytes("DMM-1000-manual.pdf"), "application/pdf", discovered)
+
+        assertThat(parsed.sourceUrl).isEqualTo(discovered.uri)
+        assertThat(parsed.linkedProductIdentity).isEqualTo("DMM-1000")
+    }
+
+    @Test
     fun `parses DOCX sections with English and Arabic specifications`() {
         val parsed = parser.parse(
             resourceBytes("DMM-1000-manual.docx"),

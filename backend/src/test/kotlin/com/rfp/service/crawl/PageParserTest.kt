@@ -196,6 +196,30 @@ class PageParserTest {
     }
 
     @Test
+    fun `preserves sibling specifications around nested product selectors`() {
+        val html = """
+            <html><body><main>
+              <article class="product">
+                <div class="product-card" data-product-id="MTR-A"><h2>Meter A</h2><p>MPN: MTR-A</p></div>
+                <section class="specifications"><p>Accuracy 0.1 percent</p><p>CAT IV 600 V</p></section>
+              </article>
+              <aside><p>Operating temperature minus 10 to 50 C</p></aside>
+            </main></body></html>
+        """.trimIndent()
+
+        val page = parser.parse(success(html))
+
+        assertThat(page.textBlocks).anySatisfy { productBlock ->
+            assertThat(productBlock).contains("Meter A MPN: MTR-A", "Accuracy 0.1 percent", "CAT IV 600 V")
+        }
+        assertThat(page.textBlocks.joinToString(" ")).contains(
+            "Accuracy 0.1 percent",
+            "CAT IV 600 V",
+            "Operating temperature minus 10 to 50 C",
+        )
+    }
+
+    @Test
     fun `carries exact linked product identity on discovered manuals`() {
         val html = """
             <html><body><main>

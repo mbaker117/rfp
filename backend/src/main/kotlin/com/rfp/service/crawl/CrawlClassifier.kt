@@ -15,7 +15,7 @@ class CrawlClassifier(
         require(maxLlmCandidateCharacters >= 128)
     }
 
-    fun classify(page: ParsedPage): PageClassification {
+    fun classify(page: ParsedPage, beforeLlmCall: () -> Unit = {}): PageClassification {
         val path = page.canonicalUrl.path.orEmpty().lowercase(Locale.ROOT)
         val text = listOfNotNull(page.title, page.visibleText).joinToString(" ")
         val productLinks = page.links.count { link ->
@@ -45,7 +45,7 @@ class CrawlClassifier(
         if (CATALOG_PATH.containsMatchIn(path) || productLinks > 0) {
             return PageClassification(PageType.CATEGORY, 65, true, partition(page, false), 80)
         }
-        llmFallback(page)?.let { return it }
+        llmFallback(page, beforeLlmCall)?.let { return it }
         return if (llmService != null) {
             PageClassification(PageType.UNKNOWN, 25, true, partition(page, false), 0)
         } else {
@@ -53,7 +53,7 @@ class CrawlClassifier(
         }
     }
 
-    private fun llmFallback(page: ParsedPage): PageClassification? {
+    private fun llmFallback(page: ParsedPage, beforeLlmCall: () -> Unit): PageClassification? {
         val service = llmService ?: return null
         val candidate = buildString {
             appendLine("url=${page.canonicalUrl}")
@@ -61,6 +61,7 @@ class CrawlClassifier(
             append(page.visibleText)
         }.take(maxLlmCandidateCharacters)
         return try {
+            beforeLlmCall()
             service.classifyCrawlPage(candidate)
         } catch (_: LlmException) {
             null

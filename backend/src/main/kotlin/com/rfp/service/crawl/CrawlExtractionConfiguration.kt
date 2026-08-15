@@ -9,12 +9,4 @@ class CrawlExtractionConfiguration {
     @Bean
     fun crawlClassifier(llmService: LlmService): CrawlClassifier = CrawlClassifier(llmService)
 
-    @Bean
-    fun productPageExtractor(
-        llmService: LlmService,
-        crawlClassifier: CrawlClassifier,
-    ): ProductPageExtractor = ProductPageExtractor(
-        llmService = llmService,
-        classifier = crawlClassifier,
-    )
 }

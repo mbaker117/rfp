@@ -154,6 +154,12 @@
             <version>1.6</version>
         </dependency>
 
+        <!-- Actuator / Micrometer -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+
         <!-- Test -->
         <dependency>
             <groupId>org.springframework.boot</groupId>

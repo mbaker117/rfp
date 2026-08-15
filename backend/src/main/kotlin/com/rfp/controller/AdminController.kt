@@ -14,7 +14,10 @@ data class ProductDto(
     val id: Long, val name: String, val mpn: String?,
     val supplierId: Long,
     val supplierName: String, val productClass: String?, val isStale: Boolean,
-    val source: String?, val attributes: String?
+    val source: String?, val attributes: String?,
+    val canonicalSourceUrl: String? = null,
+    val lastObservedAt: String? = null,
+    val extractionMethod: String? = null
 )
 data class TenderDto(
     val id: Long, val filename: String, val userId: Long,
@@ -74,7 +77,9 @@ class AdminController(
                     productClass = p.productClass?.name,
                     isStale = p.isStale,
                     source = p.source,
-                    attributes = p.attributes.takeIf { it != "{}" }
+                    attributes = p.attributes.takeIf { it != "{}" },
+                    canonicalSourceUrl = p.canonicalSourceUrl,
+                    lastObservedAt = p.lastObservedAt?.toString()
                 )
             },
             totalElements = result.totalElements

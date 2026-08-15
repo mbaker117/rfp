@@ -1,6 +1,7 @@
 import '@testing-library/jest-dom';
 import { render, screen } from '@testing-library/react';
 import { ProductAttributePanel } from '../components/ProductAttributePanel';
+import type { ProductProvenance } from '../lib/types';
 
 test('renders description, safe manual link, and remaining attributes', () => {
   render(
@@ -39,4 +40,29 @@ test('does not render a link for an unsafe manual URL', () => {
 test('renders nothing for malformed attributes JSON', () => {
   const { container } = render(<ProductAttributePanel attributesJson="not-json" />);
   expect(container).toBeEmptyDOMElement();
+});
+
+test('shows source and extraction method in product details', () => {
+  const provenance: ProductProvenance = {
+    canonicalSourceUrl: 'https://example.com/product/123',
+    lastObservedAt: '2024-06-01T00:00:00Z',
+    extractionMethod: 'JSON-LD',
+  };
+  render(<ProductAttributePanel attributesJson="{}" provenance={provenance} />);
+  expect(screen.getByRole('link', { name: /source/i })).toHaveAttribute(
+    'href',
+    provenance.canonicalSourceUrl,
+  );
+  expect(screen.getByText('JSON-LD')).toBeInTheDocument();
+});
+
+test('does not render source link for non-http URL', () => {
+  const provenance: ProductProvenance = {
+    canonicalSourceUrl: 'ftp://example.com/product/123',
+    lastObservedAt: null,
+    extractionMethod: 'LLM',
+  };
+  render(<ProductAttributePanel attributesJson="{}" provenance={provenance} />);
+  expect(screen.queryByRole('link', { name: /source/i })).not.toBeInTheDocument();
+  expect(screen.getByText('LLM')).toBeInTheDocument();
 });

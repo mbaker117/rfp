@@ -2,6 +2,7 @@ package com.rfp.service.crawl
 
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatCode
+import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.Test
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
@@ -22,6 +23,71 @@ import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 
 class CatalogDocumentWorkerTest {
+    @Test
+    fun `default admission allows one worker even with an enormous parent heap`() {
+        val admission = CatalogDocumentWorkerAdmissionDefaults.createController(
+            parentMaximumHeapBytes = Long.MAX_VALUE,
+            propertyLookup = { null },
+        )
+
+        val first = admission.acquire(workerHeapMegabytes = 128, timeout = Duration.ZERO)
+        try {
+            assertThat(first).isNotNull
+            assertThat(admission.acquire(workerHeapMegabytes = 128, timeout = Duration.ZERO)).isNull()
+        } finally {
+            first?.close()
+        }
+        val replacement = admission.acquire(workerHeapMegabytes = 128, timeout = Duration.ZERO)
+        assertThat(replacement).isNotNull
+        replacement?.close()
+    }
+
+    @Test
+    fun `bounded process override raises the default admission limit`() {
+        val admission = CatalogDocumentWorkerAdmissionDefaults.createController(
+            parentMaximumHeapBytes = Long.MAX_VALUE,
+            propertyLookup = { name ->
+                if (name == "rfp.catalog.worker.max-processes") "2" else null
+            },
+        )
+
+        val first = admission.acquire(workerHeapMegabytes = 128, timeout = Duration.ZERO)
+        val second = admission.acquire(workerHeapMegabytes = 128, timeout = Duration.ZERO)
+        try {
+            assertThat(first).isNotNull
+            assertThat(second).isNotNull
+            assertThat(admission.acquire(workerHeapMegabytes = 128, timeout = Duration.ZERO)).isNull()
+        } finally {
+            first?.close()
+            second?.close()
+        }
+    }
+
+    @Test
+    fun `invalid zero and absurd admission overrides fail configuration`() {
+        val invalidOverrides = listOf(
+            "rfp.catalog.worker.max-processes" to "not-a-number",
+            "rfp.catalog.worker.max-processes" to "0",
+            "rfp.catalog.worker.max-processes" to "-1",
+            "rfp.catalog.worker.max-processes" to "65",
+            "rfp.catalog.worker.max-aggregate-heap-mb" to "not-a-number",
+            "rfp.catalog.worker.max-aggregate-heap-mb" to "0",
+            "rfp.catalog.worker.max-aggregate-heap-mb" to "-1",
+            "rfp.catalog.worker.max-aggregate-heap-mb" to "262145",
+        )
+
+        invalidOverrides.forEach { (propertyName, propertyValue) ->
+            assertThatThrownBy {
+                CatalogDocumentWorkerAdmissionDefaults.createController(
+                    parentMaximumHeapBytes = Long.MAX_VALUE,
+                    propertyLookup = { name -> if (name == propertyName) propertyValue else null },
+                )
+            }
+                .isInstanceOf(IllegalArgumentException::class.java)
+                .hasMessageContaining(propertyName)
+        }
+    }
+
     @Test
     fun `never serializes a signed source URL into the worker request`() {
         val source = URI("https://vendor.example/manual.txt?signature=round3-super-secret&expires=999999")

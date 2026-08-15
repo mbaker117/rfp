@@ -127,23 +127,54 @@ internal class CatalogDocumentWorkerAdmissionController(
     }
 }
 
-private object CatalogDocumentWorkerGlobalAdmission {
+internal object CatalogDocumentWorkerAdmissionDefaults {
     private const val MAX_PROCESSES_PROPERTY = "rfp.catalog.worker.max-processes"
     private const val MAX_AGGREGATE_HEAP_PROPERTY = "rfp.catalog.worker.max-aggregate-heap-mb"
+    private const val DEFAULT_MAX_PROCESSES = 1
     private const val DEFAULT_WORKER_HEAP_MEGABYTES = 128
-    private const val MEBIBYTE = 1024L * 1024
+    private const val MAX_CONFIGURED_PROCESSES = 64
+    private const val MAX_SUPPORTED_WORKER_HEAP_MEGABYTES = 4_096
+    private const val MAX_CONFIGURED_AGGREGATE_HEAP_MEGABYTES =
+        MAX_CONFIGURED_PROCESSES * MAX_SUPPORTED_WORKER_HEAP_MEGABYTES
 
-    val controller: CatalogDocumentWorkerAdmissionController by lazy {
-        val memoryDerivedProcesses =
-            (Runtime.getRuntime().maxMemory() / (DEFAULT_WORKER_HEAP_MEGABYTES * MEBIBYTE)).toInt().coerceIn(1, 2)
-        val maxProcesses = positiveSystemProperty(MAX_PROCESSES_PROPERTY) ?: memoryDerivedProcesses
-        val aggregateHeap = positiveSystemProperty(MAX_AGGREGATE_HEAP_PROPERTY)
+    fun createController(
+        parentMaximumHeapBytes: Long = Runtime.getRuntime().maxMemory(),
+        propertyLookup: (String) -> String? = { System.getProperty(it) },
+    ): CatalogDocumentWorkerAdmissionController {
+        require(parentMaximumHeapBytes > 0) { "parent maximum heap must be positive" }
+        // The parent may consume its entire heap limit, so its size is not spare capacity for child JVMs.
+        val maxProcesses = boundedSystemProperty(
+            MAX_PROCESSES_PROPERTY,
+            MAX_CONFIGURED_PROCESSES,
+            propertyLookup,
+        ) ?: DEFAULT_MAX_PROCESSES
+        val aggregateHeap = boundedSystemProperty(
+            MAX_AGGREGATE_HEAP_PROPERTY,
+            MAX_CONFIGURED_AGGREGATE_HEAP_MEGABYTES,
+            propertyLookup,
+        )
             ?: Math.multiplyExact(maxProcesses, DEFAULT_WORKER_HEAP_MEGABYTES)
-        CatalogDocumentWorkerAdmissionController(maxProcesses, aggregateHeap)
+        return CatalogDocumentWorkerAdmissionController(maxProcesses, aggregateHeap)
     }
 
-    private fun positiveSystemProperty(name: String): Int? =
-        System.getProperty(name)?.toIntOrNull()?.takeIf { it > 0 }
+    private fun boundedSystemProperty(
+        name: String,
+        maximum: Int,
+        propertyLookup: (String) -> String?,
+    ): Int? {
+        val rawValue = propertyLookup(name) ?: return null
+        val value = rawValue.trim().toIntOrNull()
+        require(value != null && value in 1..maximum) {
+            "$name must be an integer between 1 and $maximum"
+        }
+        return value
+    }
+}
+
+private object CatalogDocumentWorkerGlobalAdmission {
+    val controller: CatalogDocumentWorkerAdmissionController by lazy {
+        CatalogDocumentWorkerAdmissionDefaults.createController()
+    }
 }
 
 internal class CatalogDocumentWorkerArtifacts(

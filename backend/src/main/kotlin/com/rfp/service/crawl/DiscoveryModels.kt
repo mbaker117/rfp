@@ -99,6 +99,7 @@ enum class DocumentRejectionReason {
     TIME_LIMIT_EXCEEDED,
     TYPE_MISMATCH,
     MALFORMED,
+    WORKER_INFRASTRUCTURE_FAILURE,
 }
 
 class CatalogDocumentRejectedException(

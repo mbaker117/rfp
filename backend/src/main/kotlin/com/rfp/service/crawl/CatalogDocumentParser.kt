@@ -51,6 +51,7 @@ class CatalogDocumentParser(
     maximumDuration: Duration = Duration.ofSeconds(20),
     workerMaxHeapMegabytes: Int = 128,
     maxWorkerOutputBytes: Long = 16L * 1024 * 1024,
+    workerAdmissionTimeout: Duration = Duration.ofSeconds(2),
 ) {
     private val worker = CatalogDocumentWorkerClient(
         settings = CatalogDocumentParserSettings(
@@ -73,6 +74,7 @@ class CatalogDocumentParser(
         maximumDuration = maximumDuration,
         workerMaxHeapMegabytes = workerMaxHeapMegabytes,
         maxWorkerOutputBytes = maxWorkerOutputBytes,
+        admissionTimeout = workerAdmissionTimeout,
     )
 
     fun parse(bytes: ByteArray, contentType: String, sourceUrl: URI): ParsedDocument =
@@ -353,7 +355,12 @@ internal class CatalogDocumentParserCore(
                 section = previousSection
             }
         }
-        document.body().children().forEach(::walk)
+        document.body().childNodes().forEach { node ->
+            when (node) {
+                is TextNode -> node.text().trim().takeIf(String::isNotEmpty)?.let(sectionText::add)
+                is Element -> walk(node)
+            }
+        }
         flush()
         if (fragments.size > maxSections) reject(DocumentRejectionReason.SECTION_LIMIT_EXCEEDED)
         return fragments

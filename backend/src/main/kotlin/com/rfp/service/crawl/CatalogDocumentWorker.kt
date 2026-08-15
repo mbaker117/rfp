@@ -9,9 +9,15 @@ import java.net.URLClassLoader
 import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Duration
+import java.util.Comparator
 import java.util.LinkedHashSet
+import java.util.Locale
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.locks.LockSupport
+import java.util.concurrent.locks.ReentrantLock
 import java.util.jar.JarFile
+import kotlin.concurrent.withLock
 import kotlin.io.path.absolutePathString
 import kotlin.io.path.exists
 
@@ -57,17 +63,150 @@ internal data class CatalogDocumentWorkerRequest(
     val maxWorkerOutputBytes: Long,
     val bytes: ByteArray,
     val contentType: String,
-    val sourceUrl: URI,
+    val sourceName: String,
 )
+
+internal interface CatalogDocumentWorkerObserver {
+    fun onTemporaryDirectoryCreated(path: Path) = Unit
+    fun onRequestWritten(path: Path) = Unit
+    fun onProcessStarted(handle: ProcessHandle) = Unit
+    fun onProcessExited(handle: ProcessHandle) = Unit
+    fun onCleanupFailure(path: Path, failure: Throwable) = Unit
+
+    companion object {
+        val NONE: CatalogDocumentWorkerObserver = object : CatalogDocumentWorkerObserver {}
+    }
+}
+
+internal class CatalogDocumentWorkerAdmissionController(
+    private val maxConcurrentProcesses: Int,
+    private val maxAggregateHeapMegabytes: Int,
+) {
+    private val lock = ReentrantLock(true)
+    private val changed = lock.newCondition()
+    private var activeProcesses = 0
+    private var reservedHeapMegabytes = 0
+
+    init {
+        require(maxConcurrentProcesses > 0)
+        require(maxAggregateHeapMegabytes > 0)
+    }
+
+    fun acquire(workerHeapMegabytes: Int, timeout: Duration): Lease? {
+        require(workerHeapMegabytes > 0)
+        require(!timeout.isNegative)
+        var remaining = runCatching { timeout.toNanos() }.getOrElse { Long.MAX_VALUE }
+        lock.lockInterruptibly()
+        try {
+            if (workerHeapMegabytes > maxAggregateHeapMegabytes) return null
+            while (activeProcesses >= maxConcurrentProcesses ||
+                reservedHeapMegabytes > maxAggregateHeapMegabytes - workerHeapMegabytes
+            ) {
+                if (remaining <= 0) return null
+                remaining = changed.awaitNanos(remaining)
+            }
+            activeProcesses++
+            reservedHeapMegabytes += workerHeapMegabytes
+            return Lease { release(workerHeapMegabytes) }
+        } finally {
+            lock.unlock()
+        }
+    }
+
+    private fun release(workerHeapMegabytes: Int) = lock.withLock {
+        activeProcesses--
+        reservedHeapMegabytes -= workerHeapMegabytes
+        changed.signalAll()
+    }
+
+    internal class Lease(private val release: () -> Unit) : AutoCloseable {
+        private val closed = AtomicBoolean()
+        override fun close() {
+            if (closed.compareAndSet(false, true)) release()
+        }
+    }
+}
+
+private object CatalogDocumentWorkerGlobalAdmission {
+    private const val MAX_PROCESSES_PROPERTY = "rfp.catalog.worker.max-processes"
+    private const val MAX_AGGREGATE_HEAP_PROPERTY = "rfp.catalog.worker.max-aggregate-heap-mb"
+    private const val DEFAULT_WORKER_HEAP_MEGABYTES = 128
+    private const val MEBIBYTE = 1024L * 1024
+
+    val controller: CatalogDocumentWorkerAdmissionController by lazy {
+        val memoryDerivedProcesses =
+            (Runtime.getRuntime().maxMemory() / (DEFAULT_WORKER_HEAP_MEGABYTES * MEBIBYTE)).toInt().coerceIn(1, 2)
+        val maxProcesses = positiveSystemProperty(MAX_PROCESSES_PROPERTY) ?: memoryDerivedProcesses
+        val aggregateHeap = positiveSystemProperty(MAX_AGGREGATE_HEAP_PROPERTY)
+            ?: Math.multiplyExact(maxProcesses, DEFAULT_WORKER_HEAP_MEGABYTES)
+        CatalogDocumentWorkerAdmissionController(maxProcesses, aggregateHeap)
+    }
+
+    private fun positiveSystemProperty(name: String): Int? =
+        System.getProperty(name)?.toIntOrNull()?.takeIf { it > 0 }
+}
+
+internal class CatalogDocumentWorkerArtifacts(
+    private val directory: Path,
+    private val requestPath: Path,
+    private val responsePath: Path,
+    private val deletePath: (Path) -> Unit = { path ->
+        Files.deleteIfExists(path)
+        Unit
+    },
+    private val observer: CatalogDocumentWorkerObserver = CatalogDocumentWorkerObserver.NONE,
+) {
+    fun cleanup() {
+        deleteIndependently(responsePath)
+        deleteIndependently(requestPath)
+        val extraPaths = runCatching {
+            if (!Files.exists(directory)) emptyList() else Files.walk(directory).use { paths ->
+                paths.filter { it != directory && it != requestPath && it != responsePath }
+                    .sorted(Comparator.reverseOrder())
+                    .toList()
+            }
+        }.onFailure { reportCleanupFailure(directory, it) }.getOrDefault(emptyList())
+        extraPaths.forEach(::deleteIndependently)
+        deleteDirectoryWithRetry()
+    }
+
+    private fun deleteIndependently(path: Path) {
+        runCatching { deletePath(path) }
+            .onFailure { reportCleanupFailure(path, it) }
+    }
+
+    private fun deleteDirectoryWithRetry() {
+        var lastFailure: Throwable? = null
+        repeat(10) { attempt ->
+            try {
+                deletePath(directory)
+                return
+            } catch (failure: Throwable) {
+                lastFailure = failure
+                if (attempt < 9) LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(20))
+            }
+        }
+        reportCleanupFailure(directory, checkNotNull(lastFailure))
+    }
+
+    private fun reportCleanupFailure(path: Path, failure: Throwable) {
+        runCatching { observer.onCleanupFailure(path, failure) }
+    }
+}
 
 internal class CatalogDocumentWorkerClient(
     private val settings: CatalogDocumentParserSettings,
     private val maximumDuration: Duration,
     private val workerMaxHeapMegabytes: Int,
     private val maxWorkerOutputBytes: Long,
+    private val admissionTimeout: Duration = Duration.ofSeconds(2),
+    private val admission: CatalogDocumentWorkerAdmissionController = CatalogDocumentWorkerGlobalAdmission.controller,
+    private val processLauncher: CatalogDocumentWorkerProcessStarter = CatalogDocumentWorkerProcessLauncher(),
+    private val observer: CatalogDocumentWorkerObserver = CatalogDocumentWorkerObserver.NONE,
 ) {
     init {
         require(!maximumDuration.isNegative && !maximumDuration.isZero)
+        require(!admissionTimeout.isNegative && !admissionTimeout.isZero)
         require(workerMaxHeapMegabytes in 16..4_096)
         require(maxWorkerOutputBytes in 64..256L * 1024 * 1024)
     }
@@ -75,10 +214,30 @@ internal class CatalogDocumentWorkerClient(
     fun parse(bytes: ByteArray, contentType: String, sourceUrl: URI): ParsedDocument {
         if (bytes.size > settings.maxDocumentBytes) reject(DocumentRejectionReason.OVERSIZED)
         val started = System.nanoTime()
-        val temporaryDirectory = Files.createTempDirectory("catalog-document-worker-")
+        val lease = try {
+            admission.acquire(workerMaxHeapMegabytes, minimumDuration(admissionTimeout, maximumDuration))
+                ?: reject(DocumentRejectionReason.WORKER_INFRASTRUCTURE_FAILURE)
+        } catch (interrupted: InterruptedException) {
+            Thread.currentThread().interrupt()
+            reject(DocumentRejectionReason.WORKER_INFRASTRUCTURE_FAILURE, interrupted)
+        }
+        val temporaryDirectory = try {
+            Files.createTempDirectory("catalog-document-worker-")
+        } catch (exception: Exception) {
+            lease.close()
+            reject(DocumentRejectionReason.WORKER_INFRASTRUCTURE_FAILURE, exception)
+        }
+        safelyNotify { observer.onTemporaryDirectoryCreated(temporaryDirectory) }
         val requestPath = temporaryDirectory.resolve("request.bin")
         val responsePath = temporaryDirectory.resolve("response.bin")
+        val artifacts = CatalogDocumentWorkerArtifacts(
+            temporaryDirectory,
+            requestPath,
+            responsePath,
+            observer = observer,
+        )
         var process: Process? = null
+        var processExitObserved = false
         try {
             CatalogDocumentWorkerProtocol.writeRequest(
                 requestPath,
@@ -88,17 +247,35 @@ internal class CatalogDocumentWorkerClient(
                     maxWorkerOutputBytes,
                     bytes,
                     contentType,
-                    sourceUrl,
+                    sanitizedSourceName(sourceUrl),
                 ),
             )
-            process = startWorker(requestPath, responsePath)
+            safelyNotify { observer.onRequestWritten(requestPath) }
+            process = processLauncher.start(
+                temporaryDirectory,
+                requestPath,
+                responsePath,
+                workerMaxHeapMegabytes,
+            )
+            safelyNotify { observer.onProcessStarted(process.toHandle()) }
             val remainingNanos = remainingNanos(started)
             if (remainingNanos == 0L || !process.waitFor(remainingNanos, TimeUnit.NANOSECONDS)) {
-                terminateExactly(process)
+                if (!terminateExactly(process)) {
+                    reject(DocumentRejectionReason.WORKER_INFRASTRUCTURE_FAILURE)
+                }
                 reject(DocumentRejectionReason.TIME_LIMIT_EXCEEDED)
             }
-            if (!responsePath.exists()) reject(DocumentRejectionReason.RESOURCE_LIMIT_EXCEEDED)
-            if (Files.size(responsePath) > maxWorkerOutputBytes) reject(DocumentRejectionReason.RESOURCE_LIMIT_EXCEEDED)
+            safelyNotify { observer.onProcessExited(process.toHandle()) }
+            processExitObserved = true
+            if (!responsePath.exists()) {
+                if (process.exitValue() == CatalogDocumentWorkerExit.RESOURCE_EXHAUSTED) {
+                    reject(DocumentRejectionReason.RESOURCE_LIMIT_EXCEEDED)
+                }
+                reject(DocumentRejectionReason.WORKER_INFRASTRUCTURE_FAILURE)
+            }
+            if (Files.size(responsePath) > maxWorkerOutputBytes) {
+                reject(DocumentRejectionReason.WORKER_INFRASTRUCTURE_FAILURE)
+            }
             return CatalogDocumentWorkerProtocol.readResponse(
                 responsePath,
                 sourceUrl,
@@ -108,16 +285,27 @@ internal class CatalogDocumentWorkerClient(
         } catch (rejection: CatalogDocumentRejectedException) {
             throw rejection
         } catch (interrupted: InterruptedException) {
-            process?.let(::terminateExactly)
+            val terminated = process?.let(::terminateExactly) ?: true
             Thread.currentThread().interrupt()
+            if (!terminated) reject(DocumentRejectionReason.WORKER_INFRASTRUCTURE_FAILURE, interrupted)
             reject(DocumentRejectionReason.TIME_LIMIT_EXCEEDED, interrupted)
         } catch (exception: Exception) {
-            reject(DocumentRejectionReason.MALFORMED, exception)
+            reject(DocumentRejectionReason.WORKER_INFRASTRUCTURE_FAILURE, exception)
         } finally {
-            if (process?.isAlive == true) terminateExactly(process)
-            Files.deleteIfExists(responsePath)
-            Files.deleteIfExists(requestPath)
-            Files.deleteIfExists(temporaryDirectory)
+            process?.let { worker ->
+                val terminated = runCatching { !worker.isAlive || terminateExactly(worker) }.getOrDefault(false)
+                if (!terminated) {
+                    safelyNotify {
+                        observer.onCleanupFailure(
+                            temporaryDirectory,
+                            IOException("worker process ${worker.toHandle().pid()} remained alive after forced termination"),
+                        )
+                    }
+                }
+                if (!processExitObserved && terminated) safelyNotify { observer.onProcessExited(worker.toHandle()) }
+            }
+            artifacts.cleanup()
+            lease.close()
         }
     }
 
@@ -126,58 +314,135 @@ internal class CatalogDocumentWorkerClient(
         return (allowed - (System.nanoTime() - started)).coerceAtLeast(0)
     }
 
-    private fun startWorker(requestPath: Path, responsePath: Path): Process {
-        val launch = CatalogDocumentWorkerLaunch.resolve()
+    private fun terminateExactly(process: Process): Boolean {
+        if (!process.isAlive) return !process.toHandle().isAlive
+        process.destroy()
+        if (!waitWithoutMaskingInterrupt(process, 200, TimeUnit.MILLISECONDS)) {
+            process.destroyForcibly()
+            if (!waitWithoutMaskingInterrupt(process, 2, TimeUnit.SECONDS)) return false
+        }
+        return !process.isAlive && !process.toHandle().isAlive
+    }
+
+    private fun waitWithoutMaskingInterrupt(process: Process, timeout: Long, unit: TimeUnit): Boolean {
+        val allowedNanos = unit.toNanos(timeout)
+        val started = System.nanoTime()
+        var remainingNanos = allowedNanos
+        var interrupted = Thread.interrupted()
+        try {
+            while (true) {
+                try {
+                    return process.waitFor(remainingNanos, TimeUnit.NANOSECONDS)
+                } catch (_: InterruptedException) {
+                    interrupted = true
+                    remainingNanos = (allowedNanos - (System.nanoTime() - started)).coerceAtLeast(0)
+                    if (remainingNanos == 0L) return false
+                }
+            }
+        } finally {
+            if (interrupted) Thread.currentThread().interrupt()
+        }
+    }
+
+    private fun sanitizedSourceName(sourceUrl: URI): String {
+        val filename = sourceUrl.path.orEmpty().substringAfterLast('/').substringAfterLast('\\')
+        val extension = filename.substringAfterLast('.', "")
+            .lowercase(Locale.ROOT)
+            .takeIf { it.matches(Regex("[a-z0-9]{1,16}")) }
+        return if (extension == null) "document" else "document.$extension"
+    }
+
+    private fun minimumDuration(first: Duration, second: Duration): Duration =
+        if (first <= second) first else second
+
+    private inline fun safelyNotify(notification: () -> Unit) {
+        runCatching(notification)
+    }
+}
+
+internal object CatalogDocumentWorkerExit {
+    const val RESOURCE_EXHAUSTED = 70
+    const val INFRASTRUCTURE_FAILURE = 71
+}
+
+internal fun interface CatalogDocumentWorkerProcessStarter {
+    fun start(
+        temporaryDirectory: Path,
+        requestPath: Path,
+        responsePath: Path,
+        workerMaxHeapMegabytes: Int,
+    ): Process
+}
+
+internal class CatalogDocumentWorkerProcessLauncher(
+    private val inheritedEnvironment: Map<String, String> = System.getenv(),
+    private val launchResolver: () -> WorkerLaunch = { CatalogDocumentWorkerLaunch.resolve() },
+) : CatalogDocumentWorkerProcessStarter {
+    override fun start(
+        temporaryDirectory: Path,
+        requestPath: Path,
+        responsePath: Path,
+        workerMaxHeapMegabytes: Int,
+    ): Process {
+        val launch = launchResolver()
         val command = mutableListOf(
             javaExecutable(),
             "-Xmx${workerMaxHeapMegabytes}m",
             "-Djava.awt.headless=true",
+            "-Djava.io.tmpdir=${temporaryDirectory.absolutePathString()}",
+            "-Duser.home=${temporaryDirectory.absolutePathString()}",
+            "-cp",
+            launch.classpath,
         )
         command += launch.arguments
         command += requestPath.absolutePathString()
         command += responsePath.absolutePathString()
         return ProcessBuilder(command)
+            .directory(temporaryDirectory.toFile())
             .redirectInput(ProcessBuilder.Redirect.PIPE)
             .redirectOutput(ProcessBuilder.Redirect.DISCARD)
             .redirectError(ProcessBuilder.Redirect.DISCARD)
-            .apply { environment()["CLASSPATH"] = launch.classpath }
+            .apply {
+                val childEnvironment = environment()
+                childEnvironment.clear()
+                copyAllowedEnvironment("SystemRoot", childEnvironment)
+                copyAllowedEnvironment("WINDIR", childEnvironment)
+                childEnvironment["TEMP"] = temporaryDirectory.absolutePathString()
+                childEnvironment["TMP"] = temporaryDirectory.absolutePathString()
+            }
             .start()
             .also { it.outputStream.close() }
+    }
+
+    private fun copyAllowedEnvironment(name: String, target: MutableMap<String, String>) {
+        inheritedEnvironment.entries.firstOrNull { it.key.equals(name, ignoreCase = true) }
+            ?.let { target[name] = it.value }
     }
 
     private fun javaExecutable(): String {
         val executable = if (System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) "java.exe" else "java"
         return Path.of(System.getProperty("java.home"), "bin", executable).absolutePathString()
     }
-
-    private fun terminateExactly(process: Process) {
-        if (!process.isAlive) return
-        process.destroy()
-        if (!process.waitFor(200, TimeUnit.MILLISECONDS)) {
-            process.destroyForcibly()
-            process.waitFor(2, TimeUnit.SECONDS)
-        }
-    }
 }
 
-private data class WorkerLaunch(val classpath: String, val arguments: List<String>)
+internal data class WorkerLaunch(val classpath: String, val arguments: List<String>)
 
-private object CatalogDocumentWorkerLaunch {
+internal object CatalogDocumentWorkerLaunch {
     private const val WORKER_MAIN = "com.rfp.service.crawl.CatalogDocumentWorkerMain"
 
-    fun resolve(): WorkerLaunch {
+    fun resolve(mainClass: String = WORKER_MAIN): WorkerLaunch {
         val entries = runtimeClasspathEntries()
         val bootJar = entries.firstOrNull(::isSpringBootJar)
         return if (bootJar != null) {
             WorkerLaunch(
                 classpath = bootJar,
                 arguments = listOf(
-                    "-Dloader.main=$WORKER_MAIN",
+                    "-Dloader.main=$mainClass",
                     "org.springframework.boot.loader.launch.PropertiesLauncher",
                 ),
             )
         } else {
-            WorkerLaunch(entries.joinToString(System.getProperty("path.separator")), listOf(WORKER_MAIN))
+            WorkerLaunch(entries.joinToString(System.getProperty("path.separator")), listOf(mainClass))
         }
     }
 
@@ -218,7 +483,7 @@ private object CatalogDocumentWorkerLaunch {
 internal object CatalogDocumentWorkerProtocol {
     private const val REQUEST_MAGIC = 0x43445051
     private const val RESPONSE_MAGIC = 0x43445052
-    private const val VERSION = 1
+    private const val VERSION = 2
     private const val SUCCESS = 0
     private const val REJECTED = 1
 
@@ -230,7 +495,7 @@ internal object CatalogDocumentWorkerProtocol {
             output.writeLong(runCatching { request.maximumDuration.toNanos() }.getOrElse { Long.MAX_VALUE })
             output.writeLong(request.maxWorkerOutputBytes)
             output.writeString(request.contentType)
-            output.writeString(request.sourceUrl.toString())
+            output.writeString(request.sourceName)
             output.writeInt(request.bytes.size)
             output.write(request.bytes)
         }
@@ -245,12 +510,14 @@ internal object CatalogDocumentWorkerProtocol {
         }
         val maxWorkerOutputBytes = input.readLong().also { require(it in 64..256L * 1024 * 1024) }
         val contentType = input.readString(64 * 1024L)
-        val sourceUrl = URI(input.readString(1024 * 1024L))
+        val sourceName = input.readString(64).also {
+            require(it == "document" || it.matches(Regex("document\\.[a-z0-9]{1,16}")))
+        }
         val length = input.readInt()
         require(length in 0..settings.maxDocumentBytes)
         val bytes = ByteArray(length)
         input.readFully(bytes)
-        CatalogDocumentWorkerRequest(settings, maximumDuration, maxWorkerOutputBytes, bytes, contentType, sourceUrl)
+        CatalogDocumentWorkerRequest(settings, maximumDuration, maxWorkerOutputBytes, bytes, contentType, sourceName)
     }
 
     fun writeSuccess(path: Path, parsed: ParsedDocument, maximumBytes: Long) {
@@ -407,38 +674,68 @@ private class WorkerOutputLimitException : IOException("worker output limit exce
 object CatalogDocumentWorkerMain {
     @JvmStatic
     fun main(arguments: Array<String>) {
-        if (arguments.size != 2) return
+        if (arguments.size != 2) halt(CatalogDocumentWorkerExit.INFRASTRUCTURE_FAILURE)
         val requestPath = Path.of(arguments[0])
         val responsePath = Path.of(arguments[1])
-        var responseLimit = 1024L
+        val request = try {
+            CatalogDocumentWorkerProtocol.readRequest(requestPath)
+        } catch (_: Throwable) {
+            halt(CatalogDocumentWorkerExit.INFRASTRUCTURE_FAILURE)
+        }
+        val workerSource = URI.create(request.sourceName)
         try {
-            val request = CatalogDocumentWorkerProtocol.readRequest(requestPath)
-            responseLimit = request.maxWorkerOutputBytes
             val parsed = CatalogDocumentParserCore(request.settings).parse(
                 request.bytes,
                 request.contentType,
-                request.sourceUrl,
+                workerSource,
                 request.maximumDuration,
             )
-            CatalogDocumentWorkerProtocol.writeSuccess(responsePath, parsed, responseLimit)
+            CatalogDocumentWorkerProtocol.writeSuccess(responsePath, parsed, request.maxWorkerOutputBytes)
         } catch (rejection: CatalogDocumentRejectedException) {
-            writeFallbackRejection(responsePath, rejection.reason, responseLimit)
+            if (!writeFallbackRejection(responsePath, rejection.reason, request.maxWorkerOutputBytes)) {
+                halt(CatalogDocumentWorkerExit.INFRASTRUCTURE_FAILURE)
+            }
         } catch (_: OutOfMemoryError) {
-            writeFallbackRejection(responsePath, DocumentRejectionReason.RESOURCE_LIMIT_EXCEEDED, responseLimit)
+            if (!writeFallbackRejection(
+                    responsePath,
+                    DocumentRejectionReason.RESOURCE_LIMIT_EXCEEDED,
+                    request.maxWorkerOutputBytes,
+                )
+            ) {
+                halt(CatalogDocumentWorkerExit.RESOURCE_EXHAUSTED)
+            }
         } catch (_: StackOverflowError) {
-            writeFallbackRejection(responsePath, DocumentRejectionReason.RESOURCE_LIMIT_EXCEEDED, responseLimit)
+            if (!writeFallbackRejection(
+                    responsePath,
+                    DocumentRejectionReason.RESOURCE_LIMIT_EXCEEDED,
+                    request.maxWorkerOutputBytes,
+                )
+            ) {
+                halt(CatalogDocumentWorkerExit.RESOURCE_EXHAUSTED)
+            }
         } catch (_: WorkerOutputLimitException) {
-            writeFallbackRejection(responsePath, DocumentRejectionReason.RESOURCE_LIMIT_EXCEEDED, responseLimit)
+            if (!writeFallbackRejection(
+                    responsePath,
+                    DocumentRejectionReason.RESOURCE_LIMIT_EXCEEDED,
+                    request.maxWorkerOutputBytes,
+                )
+            ) {
+                halt(CatalogDocumentWorkerExit.RESOURCE_EXHAUSTED)
+            }
         } catch (_: Throwable) {
-            writeFallbackRejection(responsePath, DocumentRejectionReason.MALFORMED, responseLimit)
+            halt(CatalogDocumentWorkerExit.INFRASTRUCTURE_FAILURE)
         }
     }
 
-    private fun writeFallbackRejection(path: Path, reason: DocumentRejectionReason, maximumBytes: Long) {
+    private fun writeFallbackRejection(path: Path, reason: DocumentRejectionReason, maximumBytes: Long): Boolean =
         runCatching {
             Files.deleteIfExists(path)
             CatalogDocumentWorkerProtocol.writeRejection(path, reason, maximumBytes.coerceAtLeast(64))
-        }
+        }.isSuccess
+
+    private fun halt(exitCode: Int): Nothing {
+        Runtime.getRuntime().halt(exitCode)
+        error("Runtime.halt returned unexpectedly")
     }
 }
 

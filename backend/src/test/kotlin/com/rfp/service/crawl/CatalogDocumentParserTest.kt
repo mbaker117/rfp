@@ -221,6 +221,15 @@ class CatalogDocumentParserTest {
     }
 
     @Test
+    fun `preserves direct body text around child elements in document order`() {
+        val html = "<html><body>before<div>child</div>after</body></html>".toByteArray()
+
+        val parsed = parser.parse(html, "text/html", source.resolve("body-mixed.html"))
+
+        assertThat(parsed.text.replace(Regex("\\s+"), " ")).isEqualTo("before child after")
+    }
+
+    @Test
     fun `uses cached displayed formula values without evaluating external workbook links`() {
         val parsed = parser.parse(
             workbookWithCachedExternalFormula(),

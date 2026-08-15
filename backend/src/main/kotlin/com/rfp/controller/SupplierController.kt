@@ -5,6 +5,7 @@ import com.rfp.domain.Supplier
 import com.rfp.repository.CatalogIngestRepository
 import com.rfp.repository.SupplierRepository
 import com.rfp.service.CatalogIngestService
+import com.rfp.service.ScrapeService
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.http.ResponseEntity
 import org.springframework.security.core.Authentication
@@ -48,6 +49,9 @@ class SupplierController(
 
     @Autowired
     private lateinit var catalogIngestService: CatalogIngestService
+
+    @Autowired
+    private lateinit var scrapeService: ScrapeService
 
     @PostMapping
     fun register(@RequestBody req: SupplierRequest): ResponseEntity<SupplierResponse> {
@@ -113,7 +117,7 @@ class SupplierController(
     @PostMapping("/{id}/catalog/scrape")
     fun triggerScrape(@PathVariable id: Long): ResponseEntity<Map<String, Any>> {
         repo.findById(id).orElse(null) ?: return ResponseEntity.notFound().build()
-        catalogIngestService.ingestScrape(id)
+        scrapeService.runScrapeJobAsync(id)
         return ResponseEntity.ok(mapOf("supplierId" to id, "status" to "scrape_started"))
     }
 

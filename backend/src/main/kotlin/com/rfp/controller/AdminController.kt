@@ -33,7 +33,7 @@ class AdminController(
 
     @PostMapping("/refresh")
     fun triggerRefresh(): ResponseEntity<Map<String, String>> {
-        refreshJob.refreshStaleSuppliers()
+        refreshJob.refresh()
         return ResponseEntity.ok(mapOf("status" to "refresh enqueued"))
     }
 

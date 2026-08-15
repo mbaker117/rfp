@@ -24,6 +24,12 @@ class CatalogIngestServiceTest {
     private val supplier = Supplier(id = 1L, name = "Acme")
     private val productClass = ProductClass(id = 10L, name = "Multimeter")
 
+    /** Builds the service without a ScrapeService dependency (removed after facade change). */
+    private fun makeService() = CatalogIngestService(
+        supplierRepo, productClassRepo, attrDefRepo, productRepo,
+        productPriceRepo, priceHistoryRepo, ingestRepo, llmService, unitService, docParser
+    )
+
     @Test
     fun `ingest upserts new product`() {
         val ingest = CatalogIngest(id = 1L, supplier = supplier, kind = "company_upload")
@@ -46,13 +52,29 @@ class CatalogIngestServiceTest {
         every { productRepo.findBySupplierId(1L) } returns emptyList()
         every { supplierRepo.save(any()) } answers { firstArg() }
 
-        val service = CatalogIngestService(
-            supplierRepo, productClassRepo, attrDefRepo, productRepo,
-            productPriceRepo, priceHistoryRepo, ingestRepo, llmService, unitService, docParser,
-            mockk(relaxed = true)  // ScrapeService
-        )
-        service.runIngest(ingest, "raw text", "upload")
+        makeService().runIngest(ingest, "raw text", "upload")
 
         verify { productRepo.save(match { it.name == "Fluke 179" && it.mpn == "FL179" }) }
+    }
+
+    @Test
+    fun `upload ingestion path does not route through CrawlCoordinator`() {
+        // CatalogIngestService has no reference to CrawlCoordinator; this test documents
+        // that the upload path (ingestFile → runIngest) is completely decoupled from the
+        // adaptive crawler after the facade change.
+        val ingest = CatalogIngest(id = 2L, supplier = supplier, kind = "company_upload")
+        every { ingestRepo.save(any()) } answers { firstArg<CatalogIngest>().copy(id = 2L) }
+        every { productClassRepo.findAll() } returns listOf(productClass)
+        every { attrDefRepo.findByProductClassId(10L) } returns emptyList()
+        every { llmService.parseCatalogBatch(any(), any()) } returns emptyList()
+        every { productRepo.findBySupplierId(1L) } returns emptyList()
+        every { supplierRepo.save(any()) } answers { firstArg() }
+
+        // Should complete without any exception or unexpected interaction
+        makeService().runIngest(ingest, "some catalog text", "upload")
+
+        // Verify ingest is saved as DONE with no coordinator involvement
+        verify { ingestRepo.save(match { it.status == "DONE" }) }
+        verify { supplierRepo.save(match { it.scrapeStatus == "DONE" }) }
     }
 }

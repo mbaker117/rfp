@@ -83,16 +83,15 @@ class CrawlCompletenessService(
         )
 
         /**
-         * "Done" statuses accepted for required-partition URLs.
-         * FETCHED is included because the coordinator sets status = FETCHED (not EXTRACTED) after
-         * a successful fetch; EXTRACTED is reserved for future sub-phases.
+         * Statuses considered "successfully done" for required-partition URLs.
+         *
+         * Only [CrawlUrlStatus.EXTRACTED] and [CrawlUrlStatus.SKIPPED] qualify.
+         * A required partition in any other terminal state (FAILED, REJECTED, FETCHED-but-not-extracted)
+         * means the catalogue section was not fully covered and reconciliation must be blocked.
          */
         private val REQUIRED_DONE_STATUSES = listOf(
             CrawlUrlStatus.EXTRACTED,
             CrawlUrlStatus.SKIPPED,
-            CrawlUrlStatus.FETCHED,
-            CrawlUrlStatus.FAILED,
-            CrawlUrlStatus.REJECTED,
         )
     }
 }

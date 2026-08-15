@@ -209,6 +209,30 @@ class CrawlReconcilerTest(
         assertThat(reloadProduct(product.id).crawlMissCount).isEqualTo(1)
     }
 
+    @Test
+    fun `complete run with required-partition URL in FAILED status cannot reconcile`() {
+        val run = makeCompleteRun()
+        urlRepo.save(
+            CrawlUrl(
+                run = run,
+                originalUrl = "https://shop.test.com/catalogue",
+                normalizedUrl = "https://shop.test.com/catalogue",
+                host = "shop.test.com",
+                status = CrawlUrlStatus.FAILED,
+                pageType = CrawlPageType.LISTING,
+                depth = 0,
+                priority = 100,
+                requiredPartition = true,
+            )
+        )
+        flush()
+
+        val result = completenessService.evaluate(run.id)
+
+        assertThat(result.canReconcile).isFalse()
+        assertThat(result.reason).contains("required-partition")
+    }
+
     // -------------------------------------------------------------------------
     // Two-snapshot miss / stale logic
     // -------------------------------------------------------------------------

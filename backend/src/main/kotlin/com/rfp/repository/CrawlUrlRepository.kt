@@ -5,15 +5,33 @@ import com.rfp.domain.CrawlUrlStatus
 import jakarta.persistence.EntityManager
 import jakarta.persistence.PersistenceContext
 import org.springframework.data.jpa.repository.JpaRepository
+import org.springframework.data.jpa.repository.Query
+import org.springframework.data.repository.query.Param
 import org.springframework.stereotype.Repository
 import org.springframework.transaction.annotation.Transactional
 import java.time.Instant
 
 interface CrawlUrlRepository : JpaRepository<CrawlUrl, Long>, CrawlUrlRepositoryCustom {
     fun countByRunIdAndStatus(runId: Long, status: CrawlUrlStatus): Long
+    fun countByRunIdAndStatusIn(runId: Long, statuses: Collection<CrawlUrlStatus>): Long
     fun existsByRunIdAndStatusIn(runId: Long, statuses: Collection<CrawlUrlStatus>): Boolean
     fun findByRunIdAndStatus(runId: Long, status: CrawlUrlStatus): List<CrawlUrl>
     fun findByRunIdAndStatusAndClaimedAtBefore(runId: Long, status: CrawlUrlStatus, cutoff: Instant): List<CrawlUrl>
+
+    /**
+     * Count required-partition URLs that have NOT yet reached a terminal extraction state.
+     * A required-partition URL is "done" when its status is EXTRACTED or SKIPPED.
+     */
+    @Query("""
+        SELECT COUNT(u) FROM CrawlUrl u
+        WHERE u.run.id = :runId
+          AND u.requiredPartition = true
+          AND u.status NOT IN :doneStatuses
+    """)
+    fun countRequiredPartitionNotDone(
+        @Param("runId") runId: Long,
+        @Param("doneStatuses") doneStatuses: Collection<CrawlUrlStatus>,
+    ): Long
 }
 
 /** Convenience extension for tests and callers that need a pending count. */

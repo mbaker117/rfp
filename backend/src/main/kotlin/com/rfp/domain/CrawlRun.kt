@@ -48,6 +48,8 @@ data class CrawlRun(
     var startedAt: Instant? = null,
     var heartbeatAt: Instant? = null,
     var finishedAt: Instant? = null,
+    /** Set when reconciliation completes; used as an idempotency guard so re-runs are no-ops. */
+    var reconciledAt: Instant? = null,
     val createdAt: Instant = Instant.now(),
     var updatedAt: Instant = Instant.now()
 )

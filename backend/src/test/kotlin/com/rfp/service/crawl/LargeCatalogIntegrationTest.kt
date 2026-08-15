@@ -8,6 +8,7 @@ import com.rfp.domain.CrawlRun
 import com.rfp.domain.CrawlRunStatus
 import com.rfp.domain.CrawlUrl
 import com.rfp.domain.CrawlUrlStatus
+import com.rfp.domain.Product
 import com.rfp.domain.Supplier
 import com.rfp.dto.ExtractedObservation
 import com.rfp.dto.ExtractionMethod
@@ -18,7 +19,6 @@ import com.rfp.repository.CrawlUrlRepository
 import com.rfp.repository.SupplierRepository
 import io.mockk.every
 import io.mockk.mockk
-import io.mockk.slot
 import io.mockk.verify
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.BeforeEach
@@ -134,29 +134,58 @@ class LargeCatalogIntegrationTest {
         }
     }
 
+    /**
+     * Critical 2: Validates the two-batch resume scenario with actual recovery between batches.
+     *
+     * Scenario:
+     * 1. First coordinator processes 5 URLs (products 1–5) → 5 observations saved.
+     * 2. A "crash" is simulated by having 5 more URLs (products 6–10) stuck in CLAIMED state.
+     * 3. [CrawlCoordinator.recoverAbandonedClaims] resets those 5 stale CLAIMED → PENDING.
+     * 4. Second coordinator batch claims and processes the 5 recovered URLs → 5 more observations.
+     * 5. Total: 10 distinct observations, 0 duplicates.
+     */
     @Test
     fun `restarted worker processes recovered URLs and accumulates observations without duplicates`() {
-        // Simulate a two-batch run:
-        //   Batch 1 (first coordinator): claimed 5 URLs, then worker crashed
-        //   Recovery: those 5 URLs reset to PENDING by recoverAbandonedClaims
-        //   Batch 2 (new coordinator): claims the 5 recovered URLs + 5 fresh ones = 10 total
-
-        val batch = (1..10).map { i ->
+        val firstBatch = (1..5).map { i ->
             makeUrl("https://shop.example.com/product/$i", CrawlPageType.PRODUCT)
+        }
+        val secondBatch = (6..10).map { i ->
+            makeUrl("https://shop.example.com/product/$i", CrawlPageType.PRODUCT)
+        }
+        // Simulate 5 URLs that a crashed worker left in CLAIMED state (12 min ago)
+        val staleClaims = (6..10).map { i ->
+            CrawlUrl(
+                id = i.toLong(),
+                run = run,
+                originalUrl = "https://shop.example.com/product/$i",
+                normalizedUrl = "https://shop.example.com/product/$i",
+                host = "shop.example.com",
+                status = CrawlUrlStatus.CLAIMED,
+                pageType = CrawlPageType.PRODUCT,
+                depth = 1,
+                priority = 50,
+                claimedAt = Instant.now().minusSeconds(720),
+            )
         }
         val savedObservations = mutableListOf<CrawlProductObservation>()
 
         every { runRepo.findById(42L) } returns Optional.of(run)
         every { supplierRepo.findById(1L) } returns Optional.of(supplier)
         every { runRepo.save(any<CrawlRun>()) } answers { firstArg() }
-        every { urlRepo.claimBatch(42L, any(), any()) } returns batch
+        // First processBatch → first 5 URLs; second processBatch → recovered 5 URLs
+        every { urlRepo.claimBatch(42L, any(), any()) } returnsMany listOf(firstBatch, secondBatch)
         every { urlRepo.save(any<CrawlUrl>()) } answers { firstArg() }
-        every { urlRepo.existsByRunIdAndStatusIn(42L, any()) } returns false
+        // After first batch more work remains; after second batch all is done
+        every { urlRepo.existsByRunIdAndStatusIn(42L, any()) } returnsMany listOf(true, false)
         every { observationRepo.save(any<CrawlProductObservation>()) } answers {
             val obs = firstArg<CrawlProductObservation>()
             savedObservations += obs
             obs
         }
+        // recoverAbandonedClaims finds the stale CLAIMED URLs from the crashed worker
+        every {
+            urlRepo.findByRunIdAndStatusAndClaimedAtBefore(42L, CrawlUrlStatus.CLAIMED, any())
+        } returns staleClaims
 
         every { fetcher.fetch(any()) } answers { call ->
             val req = call.invocation.args[0] as CrawlFetchRequest
@@ -213,7 +242,22 @@ class LargeCatalogIntegrationTest {
             )
         }
 
-        coordinator.processBatch(42L)
+        // ── Batch 1: first coordinator processes 5 URLs ───────────────────────
+        val outcome1 = coordinator.processBatch(42L)
+        assertThat(outcome1).isIn(BatchOutcome.MORE_WORK, BatchOutcome.WAITING)
+        assertThat(savedObservations).hasSize(5)
+
+        // ── Recovery: reset stale CLAIMED URLs (products 6–10) to PENDING ─────
+        coordinator.recoverAbandonedClaims(42L, Instant.now())
+        verify(exactly = 5) {
+            urlRepo.save(match { url ->
+                url.status == CrawlUrlStatus.PENDING && url.claimedAt == null
+            })
+        }
+
+        // ── Batch 2: new coordinator processes the recovered 5 URLs ───────────
+        val outcome2 = coordinator.processBatch(42L)
+        assertThat(outcome2).isEqualTo(BatchOutcome.COMPLETE)
 
         // 10 URLs each produced 1 observation — total 10, all unique by source URL
         assertThat(savedObservations).hasSize(10)
@@ -225,6 +269,13 @@ class LargeCatalogIntegrationTest {
     // Scenario B — Budget exhaustion / partial run staleness safety
     // -------------------------------------------------------------------------
 
+    /**
+     * Critical 3: PARTIAL runs must never cause reconciler to upsert products.
+     *
+     * Validates both that:
+     * - The coordinator correctly marks the run as PARTIAL on budget exhaustion.
+     * - The reconciler skips the PARTIAL run and never calls productRepo.save.
+     */
     @Test
     fun `url budget exhaustion marks run PARTIAL before processing any new batch work`() {
         // Run has already consumed its URL budget (discoveredUrlCount >= maxUrls)
@@ -252,6 +303,38 @@ class LargeCatalogIntegrationTest {
         verify { runRepo.save(match { it.status == CrawlRunStatus.PARTIAL }) }
         // Fetcher is never called — no new URLs are processed in a budget-exhausted run
         verify(exactly = 0) { fetcher.fetch(any()) }
+
+        // ── Critical 3: reconciler must be a no-op for PARTIAL runs ──────────
+        val partialRun = exhaustedRun.copy(status = CrawlRunStatus.PARTIAL)
+        every { runRepo.findById(42L) } returns Optional.of(partialRun)
+
+        val reconcilerProductRepo = mockk<com.rfp.repository.ProductRepository>()
+        val localCompletenessService = mockk<CrawlCompletenessService>()
+        every { localCompletenessService.evaluate(42L) } returns CompletenessResult(
+            canReconcile = false,
+            score = 0,
+            reason = "Run status is PARTIAL, expected COMPLETE",
+        )
+
+        val reconciler = CrawlReconciler(
+            completenessService = localCompletenessService,
+            identityService = ProductIdentityService(),
+            merger = ObservationMerger(),
+            observationRepo = observationRepo,
+            productRepo = reconcilerProductRepo,
+            priceRepo = mockk(),
+            priceHistoryRepo = mockk(),
+            runRepo = runRepo,
+            supplierRepo = supplierRepo,
+        )
+
+        val reconResult = reconciler.reconcile(42L)
+
+        // Reconciler must skip PARTIAL run and never touch product storage
+        assertThat(reconResult.skippedReason).isNotNull()
+        assertThat(reconResult.insertedCount).isEqualTo(0)
+        assertThat(reconResult.updatedCount).isEqualTo(0)
+        verify(exactly = 0) { reconcilerProductRepo.save(any<Product>()) }
     }
 
     // -------------------------------------------------------------------------

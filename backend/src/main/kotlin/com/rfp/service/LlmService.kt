@@ -16,6 +16,7 @@ class LlmException(message: String) : RuntimeException(message)
 @Service
 class LlmService(
     private val llmClient: LlmClient,
+    val maxCrawlCandidateCharacters: Int = 12_000,
     private val maxCrawlResponseBytes: Int = 256 * 1024,
     private val maxCrawlResponseCharacters: Int = 256 * 1024,
     private val maxCrawlObservations: Int = 100,
@@ -25,6 +26,7 @@ class LlmService(
 ) {
 
     init {
+        require(maxCrawlCandidateCharacters > 0)
         require(maxCrawlResponseBytes > 0)
         require(maxCrawlResponseCharacters > 0)
         require(maxCrawlObservations > 0)
@@ -61,6 +63,7 @@ class LlmService(
         knownClasses: List<ClassSchema>,
         context: CrawlExtractionContext? = null,
     ): List<CrawlLlmProduct> {
+        if (candidateText.length > maxCrawlCandidateCharacters) throw LlmException("Crawl candidate limit exceeded")
         val system = """
             Extract only products explicitly present in the candidate data. Input may be Arabic or English.
             Output schema version is 1.0. Respond with JSON only and exactly this envelope:
@@ -88,15 +91,20 @@ class LlmService(
             mapOf(
                 "sourceUrl" to it.sourceUrl.take(2_048),
                 "allowedDocuments" to it.allowedDocuments.take(50).map { document ->
-                    mapOf("url" to document.url.take(2_048), "label" to document.label.take(256))
+                    mapOf(
+                        "url" to document.url.take(2_048),
+                        "label" to document.label.take(256),
+                        "linkedProductIdentity" to document.linkedProductIdentity?.take(256),
+                    )
                 },
                 "page" to it.page,
                 "sheet" to it.sheet?.take(256),
                 "section" to it.section?.take(256),
+                "linkedProductIdentity" to it.linkedProductIdentity?.take(256),
             )
         }
         val user = mapper.writeValueAsString(mapOf(
-            "candidateData" to candidateText.take(12_000),
+            "candidateData" to candidateText,
             "knownClasses" to boundedClasses,
             "trustedContext" to boundedContext,
         ))

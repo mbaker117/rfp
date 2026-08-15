@@ -122,6 +122,98 @@ class PageParserTest {
         assertThat(product.offers.single().uri).isEqualTo(URI("https://example.com/products/dmm-42"))
     }
 
+    @Test
+    fun `JSON-LD graph resolution is independent of definition and reference order`() {
+        val html = """
+            <html><head><script type="application/ld+json">
+            {"@graph":[
+              {"@id":"#offer-42","@type":"Offer","price":"42.00","priceCurrency":"USD",
+               "url":"/offers/dmm-42"},
+              {"@type":"Product","name":"DMM-42","mpn":"DMM-42","offers":{"@id":"#offer-42"}}
+            ]}
+            </script></head><body>DMM-42</body></html>
+        """.trimIndent()
+
+        val offer = parser.parse(success(html)).jsonLdProducts.single().offers.single()
+
+        assertThat(offer.price).isEqualTo("42.00")
+        assertThat(offer.uri).isEqualTo(URI("https://example.com/offers/dmm-42"))
+    }
+
+    @Test
+    fun `JSON-LD numeric price retains exact decimal representation`() {
+        val exact = "12345678901234567890.12345678901234567890"
+        val html = """
+            <html><head><script type="application/ld+json">
+              {"@type":"Product","name":"Exact Meter","offers":{
+                "@type":"Offer","price":$exact,"priceCurrency":"USD"}}
+            </script></head><body>Exact Meter</body></html>
+        """.trimIndent()
+
+        val price = parser.parse(success(html)).jsonLdProducts.single().offers.single().price
+
+        assertThat(price).isEqualTo(exact)
+    }
+
+    @Test
+    fun `JSON-LD supports aggregate offers and price specification provenance`() {
+        val html = """
+            <html><head><script type="application/ld+json">
+            {"@graph":[
+              {"@type":"Product","name":"Specified Meter","mpn":"SPEC-1","offers":[
+                {"@type":"Offer","url":"/offers/spec-1","priceSpecification":{"@id":"#price-spec"}},
+                {"@type":"AggregateOffer","lowPrice":"99.00","priceCurrency":"USD","url":"/offers/aggregate"}
+              ]},
+              {"@id":"#price-spec","@type":"UnitPriceSpecification","price":"89.5000",
+               "priceCurrency":"USD","url":"/prices/spec-1"}
+            ]}
+            </script></head><body>Specified Meter</body></html>
+        """.trimIndent()
+
+        val offers = parser.parse(success(html)).jsonLdProducts.single().offers
+
+        assertThat(offers).extracting<String> { it.price }.containsExactly("89.5000", "99.00")
+        assertThat(offers).extracting<URI> { it.uri }.containsExactly(
+            URI("https://example.com/prices/spec-1"),
+            URI("https://example.com/offers/aggregate"),
+        )
+    }
+
+    @Test
+    fun `preserves product card boundaries instead of flattening page text`() {
+        val html = """
+            <html><body><main>
+              <div class="product">
+                <article class="product-card"><h2>Meter A</h2><p>MPN: MTR-A</p></article>
+                <article class="product-card"><h2>Meter B</h2><p>MPN: MTR-B</p></article>
+              </div>
+            </main></body></html>
+        """.trimIndent()
+
+        val page = parser.parse(success(html))
+
+        assertThat(page.textBlocks).containsExactly("Meter A MPN: MTR-A", "Meter B MPN: MTR-B")
+    }
+
+    @Test
+    fun `carries exact linked product identity on discovered manuals`() {
+        val html = """
+            <html><body><main>
+              <article class="product-card" data-product-id="DMM-1">
+                <a class="manual" href="/manuals/dmm-1.pdf">Manual</a>
+              </article>
+              <article class="product-card" data-product-id="DMM-10">
+                <a class="manual" href="/manuals/dmm-10.pdf">Manual</a>
+              </article>
+            </main></body></html>
+        """.trimIndent()
+
+        val page = parser.parse(success(html))
+
+        assertThat(page.documents.map { it.linkedProductIdentity })
+            .containsExactly("DMM-1", "DMM-10")
+    }
+
     private fun successFixture(name: String): FetchResult.Success = success(resourceBytes(name).toString(Charsets.UTF_8))
 
     private fun success(html: String) = FetchResult.Success(

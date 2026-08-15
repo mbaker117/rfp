@@ -85,6 +85,17 @@ class LlmServiceTest {
     }
 
     @Test
+    fun `crawl candidate limit is explicit rather than silently truncating`() {
+        val client = RecordingClient(validCrawlResponse())
+        val service = LlmService(client, maxCrawlCandidateCharacters = 8)
+
+        assertThatThrownBy { service.extractCrawlProducts("123456789", emptyList()) }
+            .isInstanceOf(LlmException::class.java)
+            .hasMessageContaining("candidate limit")
+        assertThat(client.userMessage).isEmpty()
+    }
+
+    @Test
     fun `crawl observation count limit is enforced before item mapping`() {
         val products = (1..3).joinToString(",") { validCrawlProduct("M-$it") }
         val client = RecordingClient("""{"schemaVersion":"1.0","products":[$products]}""")

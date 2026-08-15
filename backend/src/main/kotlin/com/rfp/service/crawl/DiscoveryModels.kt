@@ -13,6 +13,7 @@ data class DiscoveredDocument(
     val uri: URI,
     val label: String,
     val mediaType: String? = null,
+    val linkedProductIdentity: String? = null,
 )
 
 data class ProductOffer(
@@ -48,6 +49,7 @@ data class ParsedPage(
     val pagination: List<DiscoveredLink>,
     val documents: List<DiscoveredDocument>,
     val signals: PageSignals,
+    val textBlocks: List<String> = listOf(visibleText),
 )
 
 data class SitemapReference(
@@ -83,6 +85,7 @@ data class ParsedDocument(
     val sourceUrl: URI,
     val contentType: String,
     val fragments: List<DocumentFragment>,
+    val linkedProductIdentity: String? = null,
 ) {
     val text: String get() = fragments.joinToString("\n") { it.text }
     val sections: List<DocumentFragment> get() = fragments

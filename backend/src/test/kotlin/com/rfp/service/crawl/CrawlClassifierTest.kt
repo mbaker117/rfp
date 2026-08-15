@@ -80,6 +80,20 @@ class CrawlClassifierTest {
         assertThat(client.userMessage.length).isLessThanOrEqualTo(256)
     }
 
+    @Test
+    fun `malformed ambiguity fallback fails open for safe crawling`() {
+        val fallback = CrawlClassifier(LlmService(RecordingClient("not-json")))
+
+        val result = fallback.classify(page(
+            url = "https://example.com/measurement",
+            text = "precision equipment",
+        ))
+
+        assertThat(result.type).isEqualTo(CrawlPageType.UNKNOWN)
+        assertThat(result.shouldCrawl).isTrue()
+        assertThat(result.priority).isPositive()
+    }
+
     private fun page(
         url: String,
         text: String = "DMM-1000 Digital Multimeter",

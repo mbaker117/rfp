@@ -61,6 +61,7 @@ data class CrawlLlmProduct(
 data class CrawlAllowedDocument(
     val url: String,
     val label: String,
+    val linkedProductIdentity: String? = null,
 )
 
 data class CrawlExtractionContext(
@@ -69,4 +70,5 @@ data class CrawlExtractionContext(
     val page: Int? = null,
     val sheet: String? = null,
     val section: String? = null,
+    val linkedProductIdentity: String? = null,
 )

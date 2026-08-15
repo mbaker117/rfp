@@ -2,9 +2,12 @@ package com.rfp.service.crawl
 
 import com.fasterxml.jackson.core.JsonFactory
 import com.fasterxml.jackson.core.StreamReadConstraints
+import com.fasterxml.jackson.databind.DeserializationFeature
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
-import com.fasterxml.jackson.module.kotlin.registerKotlinModule
+import com.fasterxml.jackson.databind.cfg.JsonNodeFeature
+import com.fasterxml.jackson.databind.json.JsonMapper
+import com.fasterxml.jackson.module.kotlin.KotlinModule
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 import java.net.URI
@@ -20,11 +23,15 @@ class PageParser(
         require(maxJsonDepth > 0)
     }
 
-    private val objectMapper = ObjectMapper(
+    private val objectMapper: ObjectMapper = JsonMapper.builder(
         JsonFactory.builder()
             .streamReadConstraints(StreamReadConstraints.builder().maxNestingDepth(maxJsonDepth).build())
             .build(),
-    ).registerKotlinModule()
+    )
+        .addModule(KotlinModule.Builder().build())
+        .enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS)
+        .disable(JsonNodeFeature.STRIP_TRAILING_BIGDECIMAL_ZEROES)
+        .build()
 
     fun parse(fetch: FetchResult.Success): ParsedPage {
         val html = fetch.body.toString(Charsets.UTF_8)
@@ -62,7 +69,9 @@ class PageParser(
         val products = jsonLdRoots.flatMap { root ->
             val byId = root.allObjects().mapNotNull { node ->
                 node.textValue("@id")?.let { it to node }
-            }.toMap()
+            }.groupBy({ it.first }, { it.second }).mapValues { (_, definitions) ->
+                definitions.maxWith(compareBy<JsonNode> { it.size() }.thenBy { it.toString() })
+            }
             root.productNodes().map { it.toProduct(referenceBase, byId) }
         }
         val pagination = document.select("a[href]")
@@ -77,11 +86,25 @@ class PageParser(
             .filter(::isDocumentLink)
             .mapNotNull { anchor ->
                 canonicalizer.resolveAndNormalize(referenceBase, anchor.attr("href"))?.let {
-                    DiscoveredDocument(it, anchor.text().normalizedWhitespace(), anchor.attr("type").ifBlank { null })
+                    DiscoveredDocument(
+                        it,
+                        anchor.text().normalizedWhitespace(),
+                        anchor.attr("type").ifBlank { null },
+                        linkedProductIdentity(anchor),
+                    )
                 }
             }
             .distinctBy { it.uri }
         val visibleText = document.body().text().normalizedWhitespace()
+        val productBlocks = document.select(PRODUCT_BLOCK_SELECTOR)
+        val textBlocks = productBlocks
+            .filter { candidate ->
+                productBlocks.none { nested -> nested !== candidate && nested.parents().contains(candidate) }
+            }
+            .map { it.text().normalizedWhitespace() }
+            .filter(String::isNotEmpty)
+            .distinct()
+            .ifEmpty { listOfNotNull(visibleText.takeIf(String::isNotEmpty)) }
 
         return ParsedPage(
             title = document.title().trim().ifEmpty { null },
@@ -97,6 +120,7 @@ class PageParser(
                 hasProductStructuredData = products.isNotEmpty(),
                 skippedEmbeddedJson = skippedJson,
             ),
+            textBlocks = textBlocks,
         )
     }
 
@@ -126,16 +150,36 @@ class PageParser(
                     else -> null
                 }
             },
-            offers = offerNodes.map { offer ->
-                ProductOffer(
-                    price = offer.textValue("price"),
-                    priceCurrency = offer.textValue("priceCurrency"),
-                    availability = offer.textValue("availability"),
-                    uri = offer.textValue("url")?.let { canonicalizer.resolveAndNormalize(pageUrl, it) },
-                )
-            },
+            offers = offerNodes.flatMap { it.toOffers(pageUrl, nodesById) },
             source = this,
         )
+    }
+
+    private fun JsonNode.toOffers(pageUrl: URI, nodesById: Map<String, JsonNode>): List<ProductOffer> {
+        val offer = resolveReference(nodesById)
+        val specifications = offer.path("priceSpecification").let { raw ->
+            when {
+                raw.isArray -> raw.toList().map { it.resolveReference(nodesById) }
+                raw.isObject -> listOf(raw.resolveReference(nodesById))
+                raw.isTextual -> listOfNotNull(nodesById[raw.asText()])
+                else -> emptyList()
+            }
+        }
+        if (specifications.isNotEmpty()) return specifications.map { specification ->
+            ProductOffer(
+                price = specification.textValue("price") ?: offer.textValue("price") ?: offer.textValue("lowPrice"),
+                priceCurrency = specification.textValue("priceCurrency") ?: offer.textValue("priceCurrency"),
+                availability = offer.textValue("availability"),
+                uri = (specification.textValue("url") ?: offer.textValue("url"))
+                    ?.let { canonicalizer.resolveAndNormalize(pageUrl, it) },
+            )
+        }
+        return listOf(ProductOffer(
+            price = offer.textValue("price") ?: offer.textValue("lowPrice"),
+            priceCurrency = offer.textValue("priceCurrency"),
+            availability = offer.textValue("availability"),
+            uri = offer.textValue("url")?.let { canonicalizer.resolveAndNormalize(pageUrl, it) },
+        ))
     }
 
     private fun JsonNode.resolveReference(nodesById: Map<String, JsonNode>): JsonNode =
@@ -183,6 +227,18 @@ class PageParser(
         return CatalogDocumentFormatDetector.isDiscoverable(uri, anchor.attr("type").ifBlank { null }, hints)
     }
 
+    private fun linkedProductIdentity(anchor: Element): String? {
+        val container = anchor.parents().firstOrNull { it.`is`(PRODUCT_BLOCK_SELECTOR) } ?: return null
+        return listOf("data-product-id", "data-sku", "data-mpn")
+            .firstNotNullOfOrNull { attribute -> container.attr(attribute).trim().takeIf(String::isNotEmpty) }
+            ?.take(256)
+    }
+
     private fun String.normalizedWhitespace(): String = trim().split(Regex("\\s+")).joinToString(" ")
+
+    private companion object {
+        const val PRODUCT_BLOCK_SELECTOR =
+            "article, [itemtype*=Product], [data-product-id], [data-sku], .product, .product-card, .product-item"
+    }
 
 }

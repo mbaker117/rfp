@@ -93,6 +93,7 @@ class ProductPageExtractorTest {
         val client = RecordingLlmClient(
             "{truncated",
             validLlmJson(sourceUrl = "https://example.com/catalog/meters"),
+            emptyLlmJson(),
         )
         val page = emptyPage(
             url = "https://example.com/catalog/meters",
@@ -103,7 +104,7 @@ class ProductPageExtractorTest {
 
         assertThat(observations).hasSize(1)
         assertThat(observations.single().mpn).isEqualTo("DMM-200")
-        assertThat(client.messages).hasSize(2)
+        assertThat(client.messages).hasSize(3)
         assertThat(client.messages[1].length).isLessThanOrEqualTo(client.messages[0].length)
         assertThat(client.systemPrompts).allMatch { it.contains("schemaVersion") && it.contains("1.0") }
     }
@@ -127,10 +128,58 @@ class ProductPageExtractorTest {
     }
 
     @Test
+    fun `semantic page blocks are extracted independently after parser normalization`() {
+        val html = """
+            <html><body><main>
+              <article class="product-card">Meter A SKU: MTR-A</article>
+              <article class="product-card">Meter B SKU: MTR-B</article>
+            </main></body></html>
+        """.trimIndent()
+        val page = PageParser(UrlCanonicalizer()).parse(FetchResult.Success(
+            url = URI("https://example.com/catalog"),
+            status = 200,
+            contentType = "text/html",
+            body = html.toByteArray(),
+            etag = null,
+            lastModified = null,
+            method = FetchMethod.HTTP,
+            contentHash = sha256(html.toByteArray()),
+        ))
+        val client = RecordingLlmClient(
+            validLlmJson("https://example.com/catalog", identity = "MTR-A"),
+            validLlmJson("https://example.com/catalog", identity = "MTR-B"),
+        )
+
+        val observations = extractor(client).extract(page, emptyList())
+
+        assertThat(observations.map { it.mpn }).containsExactly("MTR-A", "MTR-B")
+        assertThat(client.messages).hasSize(2)
+    }
+
+    @Test
+    fun `malformed group recursively processes every reduced subgroup`() {
+        val client = RecordingLlmClient(
+            "{truncated",
+            validLlmJson("https://example.com/catalog", identity = "MTR-A"),
+            validLlmJson("https://example.com/catalog", identity = "MTR-B"),
+        )
+        val page = emptyPage(
+            url = "https://example.com/catalog",
+            text = "SKU: MTR-A meter A\nSKU: MTR-B meter B",
+        )
+
+        val observations = extractor(client, maxAttempts = 2).extract(page, emptyList())
+
+        assertThat(observations.map { it.mpn }).containsExactly("MTR-A", "MTR-B")
+        assertThat(client.messages).hasSize(3)
+    }
+
+    @Test
     fun `a malformed group retry does not discard observations from other groups`() {
         val client = RecordingLlmClient(
             "{truncated",
             validLlmJson(sourceUrl = "https://example.com/catalog", identity = "MTR-A"),
+            emptyLlmJson(),
             validLlmJson(sourceUrl = "https://example.com/catalog", identity = "MTR-B"),
         )
         val page = emptyPage(
@@ -145,13 +194,13 @@ class ProductPageExtractorTest {
 
     @Test
     fun `malformed responses become a terminal extraction error after bounded attempts`() {
-        val client = RecordingLlmClient("not-json", "still-not-json", "must-not-be-called")
+        val client = RecordingLlmClient("not-json", "still-not-json", "also-not-json")
         val page = emptyPage("https://example.com/catalog/meters", "Ambiguous model MTR-10")
 
         assertThatThrownBy { extractor(client, maxAttempts = 2).extract(page, emptyList()) }
             .isInstanceOf(CrawlExtractionException::class.java)
-            .hasMessageContaining("2 attempts")
-        assertThat(client.messages).hasSize(2)
+            .hasMessageContaining("retry depth 2")
+        assertThat(client.messages).hasSize(3)
     }
 
     @Test
@@ -208,12 +257,37 @@ class ProductPageExtractorTest {
     }
 
     @Test
+    fun `manual extraction rejects a model identity that conflicts with trusted linked product`() {
+        val client = RecordingLlmClient(validLlmJson(
+            sourceUrl = "https://example.com/manuals/dmm-10.pdf",
+            identity = "DMM-1",
+            price = null,
+            currency = null,
+            manualLink = "https://example.com/manuals/dmm-10.pdf",
+        ))
+        val document = ParsedDocument(
+            sourceUrl = URI("https://example.com/manuals/dmm-10.pdf"),
+            contentType = "application/pdf",
+            fragments = listOf(DocumentFragment(
+                "DMM-10 meter specifications",
+                DocumentProvenance(URI("https://example.com/manuals/dmm-10.pdf"), page = 1),
+            )),
+            linkedProductIdentity = "DMM-10",
+        )
+
+        assertThatThrownBy { extractor(client, maxAttempts = 1).extract(document, emptyList()) }
+            .isInstanceOf(CrawlExtractionException::class.java)
+            .hasMessageContaining("retry depth 1")
+        assertThat(client.messages.single()).contains("DMM-10")
+    }
+
+    @Test
     fun `model source and price URLs are bound to page and undiscovered manuals are removed`() {
         val response = validLlmJson(
             sourceUrl = "https://attacker.example/product",
             manualLink = "https://attacker.example/manual.pdf",
         )
-        val client = RecordingLlmClient(response, response)
+        val client = RecordingLlmClient(response, response, response)
 
         val observation = extractor(client)
             .extract(emptyPage("https://example.com/catalog", "DMM-200"), emptyList())
@@ -230,12 +304,12 @@ class ProductPageExtractorTest {
             sourceUrl = "https://example.com/catalog/meters",
             currency = "ZZZ",
         )
-        val client = RecordingLlmClient(response, response)
+        val client = RecordingLlmClient(response, response, response)
 
         assertThatThrownBy {
             extractor(client).extract(emptyPage("https://example.com/catalog", "DMM-200"), emptyList())
         }.isInstanceOf(CrawlExtractionException::class.java)
-            .hasMessageContaining("2 attempts")
+            .hasMessageContaining("retry depth 2")
     }
 
     @Test
@@ -262,6 +336,22 @@ class ProductPageExtractorTest {
     }
 
     @Test
+    fun `production extractor uses bounded ambiguity classifier and continues on malformed classification`() {
+        val client = RecordingLlmClient(
+            "not-json",
+            validLlmJson("https://example.com/measurement", identity = "MTR-OPEN"),
+        )
+        val page = emptyPage("https://example.com/measurement", "precision instrument MTR-OPEN")
+
+        val observations = extractor(client, maxAttempts = 1).extract(page, emptyList())
+
+        assertThat(observations.single().mpn).isEqualTo("MTR-OPEN")
+        assertThat(client.systemPrompts).hasSize(2)
+        assertThat(client.systemPrompts.first()).contains("Classify one ambiguous supplier page")
+        assertThat(client.messages.first().length).isLessThanOrEqualTo(2_000)
+    }
+
+    @Test
     fun `manual is associated only with matching JSON-LD product identity`() {
         val source = URI("https://example.com/catalog")
         val products = listOf("DMM-A", "DMM-B").map { identity ->
@@ -277,6 +367,29 @@ class ProductPageExtractorTest {
         assertThat(observations.single { it.mpn == "DMM-A" }.attributes["manualLink"])
             .isEqualTo("https://example.com/manuals/DMM-A.pdf")
         assertThat(observations.single { it.mpn == "DMM-B" }.attributes["manualLink"]).isNull()
+    }
+
+    @Test
+    fun `manual association uses exact linked identity without prefix collisions`() {
+        val source = URI("https://example.com/catalog")
+        val products = listOf("DMM-1", "DMM-10").map { identity ->
+            JsonLdProduct(identity, "description", identity, null, null, emptyList(), ObjectMapper().createObjectNode())
+        }
+        val document = DiscoveredDocument(
+            URI("https://example.com/manuals/DMM-10.pdf"),
+            "DMM-10 manual",
+            "application/pdf",
+            linkedProductIdentity = "DMM-10",
+        )
+
+        val observations = extractor(RecordingLlmClient()).extract(
+            emptyPage(source.toString(), products = products, documents = listOf(document)),
+            emptyList(),
+        )
+
+        assertThat(observations.single { it.mpn == "DMM-1" }.attributes["manualLink"]).isNull()
+        assertThat(observations.single { it.mpn == "DMM-10" }.attributes["manualLink"])
+            .isEqualTo(document.uri.toString())
     }
 
     @Test
@@ -310,6 +423,70 @@ class ProductPageExtractorTest {
         assertThat(observation.price).isNull()
         assertThat(observation.currency).isNull()
         assertThat(observation.priceSourceUrl).isNull()
+    }
+
+    @Test
+    fun `malformed JSON-LD sibling does not discard a valid product`() {
+        val malformed = JsonLdProduct(
+            name = null,
+            description = "missing name",
+            mpn = "BAD-1",
+            sku = null,
+            brand = null,
+            offers = emptyList(),
+            source = ObjectMapper().createObjectNode(),
+        )
+        val valid = JsonLdProduct(
+            name = "Good Meter",
+            description = "valid",
+            mpn = "GOOD-1",
+            sku = null,
+            brand = null,
+            offers = emptyList(),
+            source = ObjectMapper().createObjectNode(),
+        )
+
+        val observations = extractor(RecordingLlmClient()).extract(
+            emptyPage("https://example.com/products", products = listOf(malformed, valid)),
+            emptyList(),
+        )
+
+        assertThat(observations.map { it.mpn }).containsExactly("GOOD-1")
+    }
+
+    @Test
+    fun `malformed embedded API sibling does not discard a valid product`() {
+        val embedded = ObjectMapper().readTree("""
+            {"products":[
+              {"name":"Bad Meter","mpn":"BAD-1","description":"bad","url":"javascript:alert(1)"},
+              {"name":"Good Meter","mpn":"GOOD-1","description":"valid",
+               "url":"https://example.com/products/good-1"}
+            ]}
+        """.trimIndent())
+
+        val observations = extractor(RecordingLlmClient()).extract(
+            emptyPage("https://example.com/api/catalog", embeddedJson = listOf(embedded)),
+            emptyList(),
+        )
+
+        assertThat(observations.map { it.mpn }).containsExactly("GOOD-1")
+    }
+
+    @Test
+    fun `inline API price provenance is the endpoint rather than product URL`() {
+        val embedded = ObjectMapper().readTree("""
+            {"products":[{"name":"API Meter","mpn":"API-1","description":"meter",
+              "url":"https://example.com/products/api-1","price":"19.95","currency":"USD"}]}
+        """.trimIndent())
+
+        val observation = extractor(RecordingLlmClient()).extract(
+            emptyPage("https://example.com/api/catalog", embeddedJson = listOf(embedded)),
+            emptyList(),
+        ).single()
+
+        assertThat(observation.sourceUrl).isEqualTo(URI("https://example.com/products/api-1"))
+        assertThat(observation.priceSourceUrl).isEqualTo(URI("https://example.com/api/catalog"))
+        assertThat(observation.fieldSources["price"]?.sourceUrl).isEqualTo(observation.priceSourceUrl)
     }
 
     @Test
@@ -407,6 +584,7 @@ class ProductPageExtractorTest {
         products: List<JsonLdProduct> = emptyList(),
         embeddedJson: List<com.fasterxml.jackson.databind.JsonNode> = emptyList(),
         documents: List<DiscoveredDocument> = emptyList(),
+        textBlocks: List<String> = listOf(text),
     ) = ParsedPage(
         title = null,
         canonicalUrl = URI(url),
@@ -417,6 +595,7 @@ class ProductPageExtractorTest {
         pagination = emptyList(),
         documents = documents,
         signals = PageSignals(false, products.isNotEmpty(), 0),
+        textBlocks = textBlocks,
     )
 
     private fun validLlmJson(
@@ -433,6 +612,8 @@ class ProductPageExtractorTest {
         "priceSourceUrl":${if (price != null) "\"$sourceUrl\"" else "null"},"sourceUrl":"$sourceUrl",
         "confidence":82}]}
     """.trimIndent()
+
+    private fun emptyLlmJson() = """{"schemaVersion":"1.0","products":[]}"""
 
     private class RecordingLlmClient(vararg responses: String) : LlmClient {
         private val remaining = ArrayDeque(responses.toList())

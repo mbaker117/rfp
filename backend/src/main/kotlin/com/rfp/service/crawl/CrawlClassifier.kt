@@ -45,7 +45,12 @@ class CrawlClassifier(
         if (CATALOG_PATH.containsMatchIn(path) || productLinks > 0) {
             return PageClassification(PageType.CATEGORY, 65, true, partition(page, false), 80)
         }
-        return llmFallback(page) ?: PageClassification(PageType.OTHER, 10, false, partition(page, false), 75)
+        llmFallback(page)?.let { return it }
+        return if (llmService != null) {
+            PageClassification(PageType.UNKNOWN, 25, true, partition(page, false), 0)
+        } else {
+            PageClassification(PageType.OTHER, 10, false, partition(page, false), 75)
+        }
     }
 
     private fun llmFallback(page: ParsedPage): PageClassification? {

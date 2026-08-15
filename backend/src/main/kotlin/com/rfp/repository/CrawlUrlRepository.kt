@@ -9,7 +9,15 @@ import org.springframework.stereotype.Repository
 import org.springframework.transaction.annotation.Transactional
 import java.time.Instant
 
-interface CrawlUrlRepository : JpaRepository<CrawlUrl, Long>, CrawlUrlRepositoryCustom
+interface CrawlUrlRepository : JpaRepository<CrawlUrl, Long>, CrawlUrlRepositoryCustom {
+    fun countByRunIdAndStatus(runId: Long, status: CrawlUrlStatus): Long
+    fun existsByRunIdAndStatusIn(runId: Long, statuses: Collection<CrawlUrlStatus>): Boolean
+    fun findByRunIdAndStatus(runId: Long, status: CrawlUrlStatus): List<CrawlUrl>
+    fun findByRunIdAndStatusAndClaimedAtBefore(runId: Long, status: CrawlUrlStatus, cutoff: Instant): List<CrawlUrl>
+}
+
+/** Convenience extension for tests and callers that need a pending count. */
+fun CrawlUrlRepository.countPending(runId: Long): Long = countByRunIdAndStatus(runId, CrawlUrlStatus.PENDING)
 
 interface CrawlUrlRepositoryCustom {
     fun claimBatch(runId: Long, limit: Int, now: Instant): List<CrawlUrl>

@@ -24,7 +24,7 @@ ALTER TABLE product_price_history
     ADD COLUMN IF NOT EXISTS extraction_method VARCHAR(64),
     ADD COLUMN IF NOT EXISTS observed_at TIMESTAMPTZ;
 
-CREATE TABLE crawl_run (
+CREATE TABLE IF NOT EXISTS crawl_run (
     id BIGSERIAL PRIMARY KEY,
     supplier_id BIGINT NOT NULL REFERENCES supplier(id),
     status VARCHAR(32) NOT NULL,
@@ -54,9 +54,9 @@ CREATE TABLE crawl_run (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE INDEX crawl_run_supplier_status_idx ON crawl_run(supplier_id, status);
+CREATE INDEX IF NOT EXISTS crawl_run_supplier_status_idx ON crawl_run(supplier_id, status);
 
-CREATE TABLE crawl_url (
+CREATE TABLE IF NOT EXISTS crawl_url (
     id BIGSERIAL PRIMARY KEY,
     crawl_run_id BIGINT NOT NULL REFERENCES crawl_run(id) ON DELETE CASCADE,
     original_url TEXT NOT NULL,
@@ -86,10 +86,10 @@ CREATE TABLE crawl_url (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (crawl_run_id, normalized_url)
 );
-CREATE INDEX crawl_url_run_status_priority_idx ON crawl_url(crawl_run_id, status, priority DESC);
-CREATE INDEX crawl_url_run_next_attempt_idx ON crawl_url(crawl_run_id, next_attempt_at);
+CREATE INDEX IF NOT EXISTS crawl_url_run_status_priority_idx ON crawl_url(crawl_run_id, status, priority DESC);
+CREATE INDEX IF NOT EXISTS crawl_url_run_next_attempt_idx ON crawl_url(crawl_run_id, next_attempt_at);
 
-CREATE TABLE crawl_product_observation (
+CREATE TABLE IF NOT EXISTS crawl_product_observation (
     id BIGSERIAL PRIMARY KEY,
     crawl_run_id BIGINT NOT NULL REFERENCES crawl_run(id) ON DELETE CASCADE,
     supplier_id BIGINT NOT NULL REFERENCES supplier(id),
@@ -108,5 +108,5 @@ CREATE TABLE crawl_product_observation (
     observed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE INDEX crawl_product_observation_supplier_identity_idx
+CREATE INDEX IF NOT EXISTS crawl_product_observation_supplier_identity_idx
     ON crawl_product_observation(supplier_id, identity_key);

@@ -41,6 +41,7 @@ export default function SupplierDetailPage() {
   const [crawlBatchPages, setCrawlBatchPages] = useState<string>('');
   const [crawlMaxUrls, setCrawlMaxUrls] = useState<string>('');
   const [crawlSettingsSaved, setCrawlSettingsSaved] = useState(false);
+  const [pollGeneration, setPollGeneration] = useState(0);
 
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -82,7 +83,7 @@ export default function SupplierDetailPage() {
       cancelled = true;
       if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
     };
-  }, [fetchCrawlRuns, token]);
+  }, [fetchCrawlRuns, token, pollGeneration]);
 
   useEffect(() => {
     if (!token) return;
@@ -177,14 +178,16 @@ export default function SupplierDetailPage() {
     setAllowedHostsInput('');
   };
 
-  const handleCrawlAction = async (action: 'resume' | 'cancel' | 'retry-failed') => {
+  const handleCrawlAction = async (action: 'resume' | 'cancel' | 'retry-failed'): Promise<void> => {
     if (!latestRunDetail || !token) return;
+    if (action === 'cancel' && !window.confirm('Cancel this crawl run?')) return;
     setError('');
     try {
       if (action === 'resume') await api.crawl.resume(latestRunDetail.id, token);
       else if (action === 'cancel') await api.crawl.cancel(latestRunDetail.id, token);
       else if (action === 'retry-failed') await api.crawl.retryFailed(latestRunDetail.id, token);
       await fetchCrawlRuns();
+      setPollGeneration(g => g + 1);
     } catch (e) {
       setError('Crawl action failed: ' + String(e));
     }

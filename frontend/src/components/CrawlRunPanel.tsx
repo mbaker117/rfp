@@ -5,7 +5,7 @@ import type { CrawlRunDetail } from '@/src/lib/types';
 
 interface Props {
   run: CrawlRunDetail;
-  onAction: (action: 'resume' | 'cancel' | 'retry-failed') => void;
+  onAction: (action: 'resume' | 'cancel' | 'retry-failed') => Promise<void>;
 }
 
 const STATUS_BADGE: Record<CrawlRunDetail['status'], string> = {
@@ -34,7 +34,7 @@ export function CrawlRunPanel({ run, onAction }: Props) {
   async function handleAction(action: 'resume' | 'cancel' | 'retry-failed') {
     setPending(true);
     try {
-      onAction(action);
+      await onAction(action);
     } finally {
       setPending(false);
     }

@@ -8,6 +8,7 @@ import com.rfp.repository.SupplierRepository
 import com.rfp.service.crawl.CrawlCoordinator
 import io.mockk.every
 import io.mockk.mockk
+import jakarta.validation.Validation
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Test
 import java.util.Optional
@@ -75,5 +76,50 @@ class SupplierControllerTest {
     fun `hostname validator rejects blank entries`() {
         assertThat(isValidCrawlHost("")).isFalse()
         assertThat(isValidCrawlHost("  ")).isFalse()
+    }
+
+    // -----------------------------------------------------------------------
+    // Crawl limit field range validation
+    // -----------------------------------------------------------------------
+
+    private val validator = Validation.buildDefaultValidatorFactory().validator
+
+    @Test
+    fun `crawl limit fields reject out-of-range values`() {
+        val req = SupplierRequest(
+            name = "Test",
+            crawlThrottleMs = -1L,         // min 0
+            crawlMaxConcurrency = 0,        // min 1
+            crawlBatchPages = 0,            // min 1
+            crawlMaxUrls = 0               // min 1
+        )
+        val violations = validator.validate(req)
+        assertThat(violations).hasSize(4)
+    }
+
+    @Test
+    fun `crawl limit fields reject above-max values`() {
+        val req = SupplierRequest(
+            name = "Test",
+            crawlThrottleMs = 10001L,       // max 10000
+            crawlMaxConcurrency = 11,       // max 10
+            crawlBatchPages = 501,          // max 500
+            crawlMaxUrls = 100001          // max 100000
+        )
+        val violations = validator.validate(req)
+        assertThat(violations).hasSize(4)
+    }
+
+    @Test
+    fun `crawl limit fields accept boundary values`() {
+        val req = SupplierRequest(
+            name = "Test",
+            crawlThrottleMs = 0L,
+            crawlMaxConcurrency = 1,
+            crawlBatchPages = 1,
+            crawlMaxUrls = 1
+        )
+        val violations = validator.validate(req)
+        assertThat(violations).isEmpty()
     }
 }

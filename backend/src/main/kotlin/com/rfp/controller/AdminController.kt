@@ -2,6 +2,7 @@ package com.rfp.controller
 
 import com.rfp.job.CatalogRefreshJob
 import com.rfp.repository.AppUserRepository
+import com.rfp.repository.ProductPriceRepository
 import com.rfp.repository.ProductRepository
 import com.rfp.repository.TenderRepository
 import org.springframework.data.domain.PageRequest
@@ -31,7 +32,8 @@ class AdminController(
     private val refreshJob: CatalogRefreshJob,
     private val userRepo: AppUserRepository,
     private val productRepo: ProductRepository,
-    private val tenderRepo: TenderRepository
+    private val tenderRepo: TenderRepository,
+    private val productPriceRepo: ProductPriceRepository
 ) {
 
     @PostMapping("/refresh")
@@ -68,6 +70,7 @@ class AdminController(
             productRepo.searchByNameOrMpn(q, pageable)
         return PageResult(
             content = result.content.map { p ->
+                val price = productPriceRepo.findById(p.id).orElse(null)
                 ProductDto(
                     id = p.id,
                     name = p.name,
@@ -79,7 +82,8 @@ class AdminController(
                     source = p.source,
                     attributes = p.attributes.takeIf { it != "{}" },
                     canonicalSourceUrl = p.canonicalSourceUrl,
-                    lastObservedAt = p.lastObservedAt?.toString()
+                    lastObservedAt = p.lastObservedAt?.toString(),
+                    extractionMethod = price?.extractionMethod
                 )
             },
             totalElements = result.totalElements

@@ -14,6 +14,8 @@ import jakarta.validation.ConstraintValidator
 import jakarta.validation.ConstraintValidatorContext
 import jakarta.validation.Payload
 import jakarta.validation.Valid
+import jakarta.validation.constraints.Max
+import jakarta.validation.constraints.Min
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.http.ResponseEntity
 import org.springframework.security.core.Authentication
@@ -68,9 +70,13 @@ data class SupplierRequest(
     val categories: List<String> = emptyList(),
     @field:PlainHostnames
     val crawlAllowedHosts: List<String> = emptyList(),
+    @field:Min(0) @field:Max(10000)
     val crawlThrottleMs: Long? = null,
+    @field:Min(1) @field:Max(10)
     val crawlMaxConcurrency: Int? = null,
+    @field:Min(1) @field:Max(500)
     val crawlBatchPages: Int? = null,
+    @field:Min(1) @field:Max(100000)
     val crawlMaxUrls: Int? = null
 )
 

@@ -31,6 +31,64 @@ class LlmService(private val llmClient: LlmClient) {
             ?: throw LlmException("Failed to parse LLM JSON: ${raw.take(300)}")
     }
 
+    fun extractCrawlProducts(candidateText: String, knownClasses: List<ClassSchema>): List<CrawlLlmProduct> {
+        val classHint = knownClasses.take(40).joinToString("\n") { schema ->
+            val attributes = schema.attributes.take(40).joinToString(",") { it.name }
+            "${schema.name}:$attributes"
+        }.take(6_000)
+        val system = """
+            Extract only products explicitly present in the candidate data. Input may be Arabic or English.
+            Output schema version is 1.0. Respond with JSON only and exactly this envelope:
+            {"schemaVersion":"1.0","products":[{"identityHint":string|null,"name":string,
+            "mpn":string|null,"className":string|null,"attributes":{"description":string,
+            "manualLink":absolute-http-url|null,...},"price":number|null,"currency":iso-4217|null,
+            "priceSourceUrl":absolute-http-url|null,"sourceUrl":absolute-http-url,"confidence":integer-0-100}]}
+            Never infer currency from geography or defaults. Omit uncertain prices by returning null.
+            Known classes (bounded):
+            $classHint
+        """.trimIndent()
+        val raw = llmClient.call(system, candidateText)
+        val cleaned = raw.trim()
+            .removePrefix("```json").removePrefix("```")
+            .trimStart().removeSuffix("```").trimEnd()
+        val json = try {
+            mapper.readTree(cleaned)
+        } catch (exception: Exception) {
+            throw LlmException("Failed to parse crawl extraction JSON")
+        }
+        if (json.path("schemaVersion").asText() != "1.0") {
+            throw LlmException("Unsupported crawl extraction schema version")
+        }
+        val products = json.path("products")
+        if (!products.isArray) throw LlmException("Crawl extraction response missing products array")
+        return products.map { product ->
+            val attributes = product.path("attributes")
+            if (!attributes.isObject) throw LlmException("Crawl extraction product missing attributes")
+            CrawlLlmProduct(
+                identityHint = product.nullableText("identityHint"),
+                name = product.nullableText("name"),
+                mpn = product.nullableText("mpn"),
+                className = product.nullableText("className"),
+                attributes = mapper.readValue(attributes.toString()),
+                price = product.path("price").takeUnless { it.isMissingNode || it.isNull }
+                    ?.asText()?.let { runCatching { BigDecimal(it) }.getOrElse {
+                        throw LlmException("Invalid crawl extraction price")
+                    } },
+                currency = product.nullableText("currency"),
+                priceSourceUrl = product.nullableText("priceSourceUrl"),
+                sourceUrl = product.nullableText("sourceUrl"),
+                confidence = product.path("confidence").takeIf { it.isIntegralNumber }?.asInt(),
+            )
+        }
+    }
+
+    private fun com.fasterxml.jackson.databind.JsonNode.nullableText(field: String): String? = path(field)
+        .takeUnless { it.isMissingNode || it.isNull }
+        ?.takeIf { it.isTextual }
+        ?.asText()
+        ?.trim()
+        ?.ifEmpty { null }
+
     /**
      * When a large catalog response is truncated mid-JSON, reconstruct a valid document
      * from all complete product objects found so far.

@@ -215,3 +215,13 @@ export interface ProductProvenance {
   lastObservedAt: string | null;
   extractionMethod: string | null;
 }
+
+export interface TenderSummary {
+  id: number;
+  filename: string;
+  status: 'uploading' | 'extracting' | 'matching' | 'pending_match' | 'done' | 'failed';
+  createdAt: string;
+  lineCount: number;
+  proposalCount: number;
+  supplierIds: number[];
+}

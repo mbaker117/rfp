@@ -1,4 +1,4 @@
-import type { Supplier, RfpReport, AdminUser, AdminProduct, AdminTender, PageResult, IngestRecord, SelectedProduct, ProposalAlternative, ProposalLine, Proposal, ProductSearchResult, CrawlRunSummary, CrawlRunDetail } from './types';
+import type { Supplier, RfpReport, AdminUser, AdminProduct, AdminTender, PageResult, IngestRecord, SelectedProduct, ProposalAlternative, ProposalLine, Proposal, ProductSearchResult, CrawlRunSummary, CrawlRunDetail, TenderSummary } from './types';
 
 const BASE = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080';
 
@@ -83,10 +83,11 @@ export const api = {
     return json<{ rfpId: number }>(res);
   },
 
-  async triggerMatch(rfpId: number, token: string): Promise<{ jobId: string }> {
+  async triggerMatch(rfpId: number, token: string, supplierIds?: number[]): Promise<{ jobId: string }> {
     const res = await fetch(`${BASE}/rfp/${rfpId}/match`, {
       method: 'POST',
       headers: authHeaders(token),
+      body: supplierIds !== undefined ? JSON.stringify({ supplierIds }) : undefined,
     });
     return json<{ jobId: string }>(res);
   },
@@ -131,6 +132,20 @@ export const api = {
         { headers: authHeaders(token) }
       );
       return json<ProductSearchResult[]>(res);
+    },
+  },
+
+  myRfps: {
+    async list(token: string): Promise<TenderSummary[]> {
+      const res = await fetch(`${BASE}/rfp`, { headers: authHeaders(token) });
+      return json<TenderSummary[]>(res);
+    },
+    async delete(rfpId: number, token: string): Promise<void> {
+      const res = await fetch(`${BASE}/rfp/${rfpId}`, {
+        method: 'DELETE',
+        headers: authHeaders(token),
+      });
+      if (!res.ok) throw new Error(`API error ${res.status}`);
     },
   },
 

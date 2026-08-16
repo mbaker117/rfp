@@ -1,6 +1,7 @@
 'use client';
 import { useState, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
+import Link from 'next/link';
 import { FileUpload } from '@/src/components/FileUpload';
 import { SupplierCombobox, type SelectedSupplier } from '@/src/components/SupplierCombobox';
 import { JobStatusPoller } from '@/src/components/JobStatusPoller';
@@ -121,9 +122,9 @@ export default function Home() {
       <nav className="bg-white border-b border-slate-200 px-6 py-3 flex items-center justify-between">
         <span className="font-semibold text-slate-900">RFP Matching</span>
         <div className="flex items-center gap-4">
-          <a href="/my-rfps" className="text-sm text-slate-500 hover:text-indigo-600 transition-colors">
+          <Link href="/my-rfps" className="text-sm text-slate-500 hover:text-indigo-600 transition-colors">
             My RFPs →
-          </a>
+          </Link>
           <a href="/admin" className="text-sm text-slate-500 hover:text-indigo-600 transition-colors">
             Admin →
           </a>

@@ -13,7 +13,7 @@ export default function MyRfpsPage() {
   const [error, setError] = useState('');
 
   useEffect(() => {
-    if (!token) return;
+    if (!token) { setLoading(false); return; }
     api.myRfps.list(token)
       .then(setTenders)
       .catch(() => setError('Could not load submissions.'))

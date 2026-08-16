@@ -14,9 +14,10 @@ type SupplierState = 'checking' | 'ok' | 'empty' | 'scraping' | 'scraped';
 interface Props {
   token: string;
   onChange: (selected: SelectedSupplier[]) => void;
+  defaultSelectedIds?: number[];
 }
 
-export function SupplierCombobox({ token, onChange }: Props) {
+export function SupplierCombobox({ token, onChange, defaultSelectedIds }: Props) {
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [selected, setSelected] = useState<SelectedSupplier[]>([]);
   const [supplierStates, setSupplierStates] = useState<Record<number, SupplierState>>({});
@@ -27,9 +28,18 @@ export function SupplierCombobox({ token, onChange }: Props) {
 
   useEffect(() => {
     if (token) {
-      api.listSuppliers(token).then(setSuppliers).catch(() => {});
+      api.listSuppliers(token).then(all => {
+        setSuppliers(all);
+        if (defaultSelectedIds && defaultSelectedIds.length > 0) {
+          const preSelected = all
+            .filter(s => defaultSelectedIds.includes(s.id))
+            .map(s => ({ id: s.id, name: s.name, catalogFile: null }));
+          setSelected(preSelected);
+          onChange(preSelected);
+        }
+      }).catch(() => {});
     }
-  }, [token]);
+  }, [token]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const filtered = suppliers.filter(
     s =>

@@ -1,17 +1,30 @@
 package com.rfp.controller
 
 import com.rfp.domain.Tender
-import com.rfp.repository.MatchResultRepository
-import com.rfp.repository.TenderRepository
-import com.rfp.repository.TenderLineRepository
+import com.rfp.domain.TenderSupplier
+import com.rfp.domain.TenderSupplierId
+import com.rfp.repository.*
+import com.rfp.service.MatchingEngineService
 import com.rfp.service.ReportService
 import com.rfp.service.TenderExtractionService
-import com.rfp.service.MatchingEngineService
 import org.springframework.http.HttpStatus
 import org.springframework.http.ResponseEntity
 import org.springframework.security.core.Authentication
 import org.springframework.web.bind.annotation.*
 import org.springframework.web.multipart.MultipartFile
+import java.time.Instant
+
+data class TenderSummaryDto(
+    val id: Long,
+    val filename: String,
+    val status: String,
+    val createdAt: Instant,
+    val lineCount: Int,
+    val proposalCount: Int,
+    val supplierIds: List<Long>
+)
+
+data class MatchRequestBody(val supplierIds: List<Long>? = null)
 
 @RestController
 @RequestMapping("/rfp")
@@ -21,7 +34,11 @@ class RfpController(
     private val matchResultRepo: MatchResultRepository,
     private val extractionService: TenderExtractionService,
     private val matchingService: MatchingEngineService,
-    private val reportService: ReportService
+    private val reportService: ReportService,
+    private val proposalRepo: ProposalRepository,
+    private val proposalLineRepo: ProposalLineRepository,
+    private val tenderSupplierRepo: TenderSupplierRepository,
+    private val supplierRepo: SupplierRepository
 ) {
     @PostMapping("/upload", consumes = ["multipart/form-data"])
     fun upload(
@@ -29,7 +46,7 @@ class RfpController(
         @RequestParam("supplierIds", required = false, defaultValue = "") supplierIds: List<Long>,
         auth: Authentication
     ): ResponseEntity<Map<String, Any>> {
-        val userId = auth.principal as? Long ?: return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build()
+        val userId = auth.name.toLongOrNull() ?: return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build()
         val ext = file.originalFilename?.substringAfterLast('.', "")?.lowercase() ?: ""
         if (ext !in setOf("pdf", "docx", "doc", "xlsx", "xls"))
             return ResponseEntity.badRequest().body(mapOf("error" to "Unsupported file type"))
@@ -39,9 +56,66 @@ class RfpController(
         return ResponseEntity.ok(mapOf("rfpId" to tender.id))
     }
 
+    @GetMapping
+    fun list(auth: Authentication): ResponseEntity<List<TenderSummaryDto>> {
+        val userId = auth.name.toLongOrNull() ?: return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build()
+        val tenders = tenderRepo.findByUserIdOrderByCreatedAtDesc(userId)
+        val summaries = tenders.map { t ->
+            TenderSummaryDto(
+                id = t.id,
+                filename = t.filename,
+                status = t.status,
+                createdAt = t.createdAt,
+                lineCount = tenderLineRepo.findByTenderId(t.id).size,
+                proposalCount = proposalRepo.findByTenderId(t.id).size,
+                supplierIds = tenderSupplierRepo.findSupplierIdsByTenderId(t.id)
+            )
+        }
+        return ResponseEntity.ok(summaries)
+    }
+
+    @DeleteMapping("/{id}")
+    fun delete(@PathVariable id: Long, auth: Authentication): ResponseEntity<Void> {
+        val userId = auth.name.toLongOrNull() ?: return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build()
+        val tender = tenderRepo.findById(id).orElseThrow { NoSuchElementException("Tender $id not found") }
+        if (tender.userId != userId) return ResponseEntity.status(HttpStatus.FORBIDDEN).build()
+
+        proposalRepo.findByTenderId(id).forEach { proposalLineRepo.deleteByProposalId(it.id) }
+        proposalRepo.deleteByTenderId(id)
+        matchResultRepo.deleteByLineTenderId(id)
+        tenderSupplierRepo.deleteByTenderId(id)
+        tenderLineRepo.deleteByTenderId(id)
+        tenderRepo.deleteById(id)
+        return ResponseEntity.noContent().build()
+    }
+
     @PostMapping("/{id}/match")
-    fun match(@PathVariable id: Long): ResponseEntity<Map<String, Any>> {
-        tenderRepo.findById(id).orElseThrow { NoSuchElementException("Tender $id not found") }
+    fun match(
+        @PathVariable id: Long,
+        @RequestBody(required = false) body: MatchRequestBody?,
+        auth: Authentication
+    ): ResponseEntity<Map<String, Any>> {
+        val userId = auth.name.toLongOrNull() ?: return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build()
+        val tender = tenderRepo.findById(id).orElseThrow { NoSuchElementException("Tender $id not found") }
+        if (tender.userId != userId) return ResponseEntity.status(HttpStatus.FORBIDDEN).build()
+
+        val newSupplierIds = body?.supplierIds
+        if (!newSupplierIds.isNullOrEmpty()) {
+            tenderSupplierRepo.deleteByTenderId(id)
+            newSupplierIds.forEach { sid ->
+                tenderSupplierRepo.save(
+                    TenderSupplier(
+                        id = TenderSupplierId(id, sid),
+                        tender = tender,
+                        supplier = supplierRepo.getReferenceById(sid)
+                    )
+                )
+            }
+        }
+        proposalRepo.findByTenderId(id).forEach { proposalLineRepo.deleteByProposalId(it.id) }
+        proposalRepo.deleteByTenderId(id)
+        matchResultRepo.deleteByLineTenderId(id)
+        tenderRepo.save(tender.copy(status = "pending_match"))
         matchingService.matchAsync(id)
         return ResponseEntity.ok(mapOf("jobId" to "rfp-$id-match"))
     }

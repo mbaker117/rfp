@@ -190,5 +190,8 @@ class RfpControllerTest {
         )
             .andExpect(status().isOk)
             .andExpect(jsonPath("$.jobId").value("rfp-1-match"))
+
+        io.mockk.verify(exactly = 1) { tenderSupplierRepo.deleteByTenderId(1L) }
+        io.mockk.verify(atLeast = 1) { tenderSupplierRepo.save(any()) }
     }
 }

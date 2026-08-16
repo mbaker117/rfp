@@ -13,7 +13,7 @@ export default function MyRfpsPage() {
   const [error, setError] = useState('');
 
   useEffect(() => {
-    if (!token) { setLoading(false); return; }
+    if (!token) return;  // stay in loading state until token arrives
     api.myRfps.list(token)
       .then(setTenders)
       .catch(() => setError('Could not load submissions.'))
@@ -23,6 +23,8 @@ export default function MyRfpsPage() {
   function handleDeleted(id: number) {
     setTenders(ts => ts.filter(t => t.id !== id));
   }
+
+  if (!token) return null;
 
   return (
     <div className="min-h-screen p-8 max-w-3xl mx-auto space-y-6">

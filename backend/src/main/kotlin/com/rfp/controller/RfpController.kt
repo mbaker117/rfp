@@ -10,6 +10,7 @@ import com.rfp.service.TenderExtractionService
 import org.springframework.http.HttpStatus
 import org.springframework.http.ResponseEntity
 import org.springframework.security.core.Authentication
+import org.springframework.transaction.annotation.Transactional
 import org.springframework.web.bind.annotation.*
 import org.springframework.web.multipart.MultipartFile
 import java.time.Instant
@@ -28,7 +29,7 @@ data class MatchRequestBody(val supplierIds: List<Long>? = null)
 
 @RestController
 @RequestMapping("/rfp")
-class RfpController(
+open class RfpController(
     private val tenderRepo: TenderRepository,
     private val tenderLineRepo: TenderLineRepository,
     private val matchResultRepo: MatchResultRepository,
@@ -74,6 +75,7 @@ class RfpController(
         return ResponseEntity.ok(summaries)
     }
 
+    @Transactional
     @DeleteMapping("/{id}")
     fun delete(@PathVariable id: Long, auth: Authentication): ResponseEntity<Void> {
         val userId = auth.name.toLongOrNull() ?: return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build()
@@ -89,6 +91,7 @@ class RfpController(
         return ResponseEntity.noContent().build()
     }
 
+    @Transactional
     @PostMapping("/{id}/match")
     fun match(
         @PathVariable id: Long,

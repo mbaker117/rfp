@@ -30,7 +30,7 @@ export function SupplierCombobox({ token, onChange, defaultSelectedIds }: Props)
     if (token) {
       api.listSuppliers(token).then(all => {
         setSuppliers(all);
-        if (defaultSelectedIds && defaultSelectedIds.length > 0) {
+        if (defaultSelectedIds !== undefined) {
           const preSelected = all
             .filter(s => defaultSelectedIds.includes(s.id))
             .map(s => ({ id: s.id, name: s.name, catalogFile: null }));

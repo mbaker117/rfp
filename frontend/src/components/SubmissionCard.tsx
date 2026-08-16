@@ -28,9 +28,10 @@ export function SubmissionCard({ tender, token, onDeleted }: Props) {
   const [rerunError, setRerunError] = useState('');
   const [rerunLoading, setRerunLoading] = useState(false);
   const [deleteError, setDeleteError] = useState('');
+  const [localStatus, setLocalStatus] = useState(tender.status);
 
-  const reportEnabled = REPORT_ENABLED_STATUSES.has(tender.status);
-  const rerunDisabled = tender.status === 'matching' || tender.status === 'extracting';
+  const reportEnabled = REPORT_ENABLED_STATUSES.has(localStatus);
+  const rerunDisabled = localStatus === 'matching' || localStatus === 'extracting' || localStatus === 'pending_match' || localStatus === 'uploading';
 
   async function handleDelete() {
     if (!window.confirm('Delete this submission and all its results?')) return;
@@ -48,6 +49,7 @@ export function SubmissionCard({ tender, token, onDeleted }: Props) {
     try {
       const ids = selectedSuppliers.map(s => s.id);
       await api.triggerMatch(tender.id, token, ids.length > 0 ? ids : undefined);
+      setLocalStatus('pending_match');
       setRerunOpen(false);
     } catch {
       setRerunError('Could not start matching.');
@@ -56,7 +58,7 @@ export function SubmissionCard({ tender, token, onDeleted }: Props) {
     }
   }
 
-  const statusColor = STATUS_COLORS[tender.status] ?? 'bg-gray-100 text-gray-700';
+  const statusColor = STATUS_COLORS[localStatus] ?? 'bg-gray-100 text-gray-700';
   const created = new Date(tender.createdAt).toLocaleString();
 
   return (
@@ -65,7 +67,7 @@ export function SubmissionCard({ tender, token, onDeleted }: Props) {
         <div>
           <span className="font-medium">{tender.filename}</span>
           <span className={`ml-2 px-2 py-0.5 rounded text-xs font-semibold ${statusColor}`}>
-            {tender.status}
+            {localStatus}
           </span>
         </div>
         <span className="text-sm text-gray-500">{created}</span>
@@ -125,7 +127,7 @@ export function SubmissionCard({ tender, token, onDeleted }: Props) {
               {rerunLoading ? 'Starting…' : 'Run'}
             </button>
             <button
-              onClick={() => setRerunOpen(false)}
+              onClick={() => { setRerunOpen(false); setSelectedSuppliers([]); }}
               className="text-sm text-gray-500 hover:underline"
             >
               Cancel

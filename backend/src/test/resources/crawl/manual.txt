@@ -1,0 +1,4 @@
+DMM-1000 Service Manual
+Measurement range: 600 V
+Accuracy: 0.5 percent
+تعليمات السلامة: الفئة الثالثة

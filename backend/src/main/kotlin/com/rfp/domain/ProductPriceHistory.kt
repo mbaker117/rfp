@@ -13,5 +13,8 @@ data class ProductPriceHistory(
     val product: Product,
     val price: BigDecimal,
     val currency: String = "JOD",
-    val recordedAt: Instant = Instant.now()
+    val recordedAt: Instant = Instant.now(),
+    val sourceUrl: String? = null,
+    val extractionMethod: String? = null,
+    val observedAt: Instant? = null
 )

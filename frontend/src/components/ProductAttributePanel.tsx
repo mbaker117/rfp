@@ -1,7 +1,11 @@
 'use client';
 
+import type { ProductProvenance as ProductProvenanceType } from '@/src/lib/types';
+import { ProductProvenance } from './ProductProvenance';
+
 interface Props {
   attributesJson: string;
+  provenance?: ProductProvenanceType;
 }
 
 function isSafeExternalUrl(value: string): boolean {
@@ -14,12 +18,12 @@ function isSafeExternalUrl(value: string): boolean {
 }
 
 /** Renders parsed product attributes as a simple key-value grid. */
-export function ProductAttributePanel({ attributesJson }: Props) {
+export function ProductAttributePanel({ attributesJson, provenance }: Props) {
   let attrs: Record<string, unknown> = {};
   try { attrs = JSON.parse(attributesJson); } catch { return null; }
 
   const keys = Object.keys(attrs).filter(k => attrs[k] !== null && attrs[k] !== '');
-  if (keys.length === 0) return null;
+  if (keys.length === 0 && !provenance) return null;
 
   const description = attrs['description'] as string | undefined;
   const rawManualLink = attrs['manualLink'];
@@ -53,6 +57,7 @@ export function ProductAttributePanel({ attributesJson }: Props) {
           ))}
         </dl>
       )}
+      {provenance && <ProductProvenance provenance={provenance} />}
     </div>
   );
 }

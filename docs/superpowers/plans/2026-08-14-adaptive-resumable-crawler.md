@@ -275,11 +275,11 @@ git commit -m "feat: add robots-aware bounded crawl fetching"
 - Produces: `PageParser.parse(fetch: FetchResult.Success): ParsedPage`.
 - Produces: `ParsedPage(title, canonicalUrl, visibleText, links, jsonLdProducts, embeddedJson, pagination, documents, signals)`.
 - Produces: `SitemapParser.parse(xml: String): SitemapResult.Index | SitemapResult.Urls`.
-- Produces: `CatalogDocumentParser.parse(bytes: ByteArray, contentType: String, sourceUrl: URI): ParsedDocument`.
+- Produces: `CatalogDocumentParser.parse(bytes: ByteArray, contentType: String, sourceUrl: URI): ParsedDocument` for PDF, DOC, DOCX, XLS, XLSX, plain text, and HTML manuals/catalogs.
 
 - [ ] **Step 1: Create realistic fixtures and failing parser tests**
 
-Fixtures must include nested anchor markup, Arabic product text, `rel=canonical`, JSON-LD Product/Offer, pagination, a PDF datasheet, an embedded JSON state object, and a sitemap index referencing multiple child sitemaps. The PDF fixture must contain two product records and one manual URL so document parsing has an observable contract.
+Fixtures must include nested anchor markup, Arabic product text, `rel=canonical`, JSON-LD Product/Offer, pagination, PDF and DOCX manuals, an XLSX specification sheet, an embedded JSON state object, and a sitemap index referencing multiple child sitemaps. Document fixtures must contain product specifications and retain page, section, or sheet provenance.
 
 ```kotlin
 @Test
@@ -300,7 +300,7 @@ Expected: compilation fails because parsing types do not exist.
 
 - [ ] **Step 3: Implement parsing without regex HTML traversal**
 
-Use Jsoup selectors and Jackson for structured JSON. Resolve every discovered reference through `UrlCanonicalizer`. Parse XML with external entities and DTD processing disabled. Limit embedded JSON depth/size. Use PDFBox for bounded PDF text extraction and return page-number provenance with discovered links; reject encrypted, oversized, or page-limit-exceeding documents explicitly. Return data only; do not enqueue or persist from parsers.
+Use Jsoup selectors and Jackson for structured JSON. Resolve every discovered reference through `UrlCanonicalizer`. Parse XML with external entities and DTD processing disabled. Limit embedded JSON depth/size. Reuse `DocumentParsingService` where its format handling fits, adding provenance-aware adapters for PDFBox and Apache POI so PDF, DOC, DOCX, XLS, XLSX, plain-text, and HTML manuals return page, section, or sheet provenance. Reject encrypted, oversized, unsupported, or page/sheet-limit-exceeding documents explicitly. Return data only; do not enqueue or persist from parsers.
 
 - [ ] **Step 4: Verify and commit**
 
@@ -327,7 +327,7 @@ git commit -m "feat: parse structured catalog pages and sitemaps"
 - Produces: `CrawlClassifier.classify(page: ParsedPage): PageClassification`.
 - Produces: `ProductPageExtractor.extract(page: ParsedPage, classes: List<ClassSchema>): List<ExtractedObservation>`.
 - Produces: `PageClassification(type, priority, shouldCrawl, partitionKey, confidence)`.
-- Produces: `ExtractedObservation(identityHint, name, mpn, className, attributes, price, currency, sourceUrl, method, confidence, fieldSources)`.
+- Produces: `ExtractedObservation(identityHint, name, mpn, className, attributes, price, currency, priceSourceUrl, sourceUrl, method, confidence, fieldSources, observedAt)`.
 
 - [ ] **Step 1: Write failing deterministic and LLM-fallback tests**
 
@@ -355,7 +355,7 @@ Expected: compilation fails for missing classifier and extractor.
 
 - [ ] **Step 3: Implement deterministic-first classification and extraction**
 
-Use URL patterns, sitemap metadata, JSON-LD types, pagination signals, product identifiers, and product density before calling the LLM. Give the LLM bounded candidate data and require versioned JSON. Validate required fields, absolute safe source URLs, numeric prices, currency codes, attributes, description, and manual link. Retry malformed batches by reducing batch size; record a terminal extraction error after the configured attempts.
+Use URL patterns, sitemap metadata, JSON-LD types, pagination signals, product identifiers, and product density before calling the LLM. Give the LLM bounded candidate data and require versioned JSON. Validate required fields, absolute safe source URLs, numeric prices, ISO currency codes, price source URL, observation time, attributes, description, and manual link. Do not infer currency from geography or a configured default when the source omits it. Retry malformed batches by reducing batch size; record a terminal extraction error after the configured attempts.
 
 - [ ] **Step 4: Verify and commit**
 
@@ -456,7 +456,7 @@ Expected: compilation fails for missing services.
 
 - [ ] **Step 3: Implement identity and deterministic merge**
 
-Create identity keys as `mpn:<normalized>` or `fallback:<sha256(normalizedName|className|canonicalUrl)>`. Merge by extraction-method rank (`JSON_LD`, `API`, `PRODUCT_PAGE_LLM`, `LISTING_LLM`), then confidence, then observation time. Preserve per-field provenance from the winning observation.
+Create identity keys as `mpn:<normalized>` or `fallback:<sha256(normalizedName|className|canonicalUrl)>`. Merge by extraction-method rank (`API`, `JSON_LD`, `MANUFACTURER_MANUAL`, `PRODUCT_PAGE_LLM`, `LISTING_LLM`), then confidence, then observation time. Preserve document URL plus page, section, or sheet provenance from manual-derived fields.
 
 - [ ] **Step 4: Add failing completeness and two-snapshot stale tests**
 
@@ -482,7 +482,7 @@ fun `second consecutive complete miss marks product stale`() {
 
 - [ ] **Step 5: Implement completeness and reconciliation transaction**
 
-Complete only when required partitions have no pending/retry/failed records, no limit was exhausted, and all product pages reached extracted/skipped state. Upsert merged observations with source/provenance using the existing product-class resolution, unit normalization, product-price, and price-history repositories. Only complete runs change miss counters. Reappearance clears the count and crawler-controlled stale state.
+Complete only when required partitions have no pending/retry/failed records, no limit was exhausted, and all product pages reached extracted/skipped state. Upsert merged observations with source/provenance using the existing product-class resolution and unit normalization. Update `product_price` from the winning priced observation and append the prior amount/currency/source to `product_price_history` only when amount or currency changes. Price precedence is API/JSON-LD Offer, product page, manufacturer document, then listing; unresolved currencies are not persisted as authoritative prices. Only complete runs change miss counters. Reappearance clears the count and crawler-controlled stale state.
 
 - [ ] **Step 6: Verify and commit**
 

@@ -17,6 +17,15 @@ data class Supplier(
     val categories: Array<String> = emptyArray(),
     val scrapeStatus: String = "PENDING",
     val lastScrapedAt: Instant? = null,
+    @Column(columnDefinition = "text[]")
+    val crawlAllowedHosts: Array<String> = emptyArray(),
+    val crawlThrottleMs: Long? = null,
+    val crawlMaxConcurrency: Int? = null,
+    val crawlBatchPages: Int? = null,
+    val crawlBatchDocuments: Int? = null,
+    val crawlMaxUrls: Int? = null,
+    val crawlMaxDurationMinutes: Int? = null,
+    val crawlRobotsFailClosed: Boolean? = null,
     val createdAt: Instant = Instant.now()
 ) {
     override fun equals(other: Any?) = other is Supplier && id == other.id

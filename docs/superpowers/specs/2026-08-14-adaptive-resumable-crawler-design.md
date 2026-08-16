@@ -130,7 +130,11 @@ Jsoup replaces regex-based HTML parsing. The parser extracts:
 - Product identifiers, prices, currencies, descriptions, images, manuals, and datasheets.
 - Supported catalog documents, subject to size and count limits.
 
+Linked manufacturer manuals and datasheets are first-class product sources. The crawler downloads supported PDF, DOC, DOCX, XLS, XLSX, plain-text, and HTML manuals within the same host-policy, robots, response-size, document-count, and timeout limits. It parses their specifications and merges them into the associated product rather than storing only the link. Manual-derived fields retain document URL plus page, sheet, or section provenance. Manufacturer structured data and public product APIs outrank manual-derived values; manual-derived values outrank listing-page extraction when conflicts occur.
+
 Product pages are processed independently. Catalog-wide character truncation is removed. Listing pages may produce provisional observations, which higher-confidence product-page observations enrich or supersede.
+
+Price is part of every product observation when present. The crawler captures the numeric amount, ISO currency, source URL, extraction method, and observation time. Public API and JSON-LD Offer values outrank product-page values, which outrank manufacturer-document and listing values. Currency is never inferred from supplier location alone; values without a trustworthy currency remain unresolved. Reconciliation updates `product_price` and appends the prior value to `product_price_history` only when amount or currency changes.
 
 The LLM is called on page-sized or product-group-sized batches with a versioned JSON schema. Responses are validated before use. Malformed or truncated output retries with a smaller batch. Deterministic merging resolves duplicate observations by stable identity, source confidence, extraction confidence, and freshness.
 
@@ -229,5 +233,7 @@ Controller and frontend tests cover enqueue compatibility, progress contracts, r
 - Incomplete runs cannot mark products stale.
 - Products become stale only after absence from two consecutive complete snapshots.
 - Every product observation has a source URL and extraction method.
+- Supported linked manuals and datasheets contribute product specifications with document-level provenance.
+- Available product prices include currency, source, observation time, and change history without guessed currencies.
 - Administrators can understand, cancel, resume, and retry crawl work from the supplier page.
 - Existing upload ingestion and scrape endpoint compatibility are preserved.

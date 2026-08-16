@@ -5,7 +5,6 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.rfp.domain.*
 import com.rfp.dto.*
 import com.rfp.repository.*
-import org.springframework.context.annotation.Lazy
 import org.springframework.scheduling.annotation.Async
 import org.springframework.stereotype.Service
 import java.math.BigDecimal
@@ -22,8 +21,7 @@ open class CatalogIngestService(
     private val ingestRepo: CatalogIngestRepository,
     private val llmService: LlmService,
     private val unitService: UnitNormalizationService,
-    private val docParser: DocumentParsingService,
-    @Lazy private val scrapeService: ScrapeService
+    private val docParser: DocumentParsingService
 ) {
     private val mapper = ObjectMapper().apply { findAndRegisterModules() }
 
@@ -34,22 +32,6 @@ open class CatalogIngestService(
         try {
             val rawText = docParser.extractText(bytes, fileType)
             runIngest(ingest, rawText, "upload")
-        } catch (e: Exception) {
-            ingestRepo.save(ingest.copy(status = "FAILED", errorMsg = e.message, finishedAt = Instant.now()))
-            supplierRepo.save(supplier.copy(scrapeStatus = "FAILED"))
-        }
-    }
-
-    @Async("taskExecutor")
-    open fun ingestScrape(supplierId: Long) {
-        val supplier = supplierRepo.findById(supplierId).orElseThrow()
-        val ingest = ingestRepo.save(CatalogIngest(supplier = supplier, kind = "scrape", status = "RUNNING", startedAt = Instant.now()))
-        try {
-            val crawl = scrapeService.crawlWebsite(supplier.officialWebsite
-                ?: throw IllegalStateException("No website for supplier ${supplier.name}"))
-            // Save partial step log before extraction so it's visible even if extraction fails
-            ingestRepo.save(ingest.copy(stepLog = crawl.stepLog))
-            runIngest(ingest.copy(stepLog = crawl.stepLog), crawl.content, "scrape")
         } catch (e: Exception) {
             ingestRepo.save(ingest.copy(status = "FAILED", errorMsg = e.message, finishedAt = Instant.now()))
             supplierRepo.save(supplier.copy(scrapeStatus = "FAILED"))
@@ -117,9 +99,11 @@ open class CatalogIngestService(
             }
         }
 
-        // Mark products not seen in this run as stale
+        // Mark ingest-sourced products not seen in this run as stale.
+        // Exclude crawler-discovered products (canonicalSourceUrl != null) to prevent
+        // a PDF upload from staling products that were found by the adaptive crawler.
         productRepo.findBySupplierId(supplier.id)
-            .filter { it.id !in seenIds && !it.isStale }
+            .filter { it.id !in seenIds && !it.isStale && it.canonicalSourceUrl == null }
             .forEach { productRepo.save(it.copy(isStale = true)) }
 
         ingestRepo.save(ingest.copy(status = "DONE", itemsFound = seenIds.size, finishedAt = Instant.now(), stepLog = updatedLog))

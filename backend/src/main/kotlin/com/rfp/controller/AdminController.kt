@@ -2,6 +2,7 @@ package com.rfp.controller
 
 import com.rfp.job.CatalogRefreshJob
 import com.rfp.repository.AppUserRepository
+import com.rfp.repository.ProductPriceRepository
 import com.rfp.repository.ProductRepository
 import com.rfp.repository.TenderRepository
 import org.springframework.data.domain.PageRequest
@@ -14,7 +15,10 @@ data class ProductDto(
     val id: Long, val name: String, val mpn: String?,
     val supplierId: Long,
     val supplierName: String, val productClass: String?, val isStale: Boolean,
-    val source: String?, val attributes: String?
+    val source: String?, val attributes: String?,
+    val canonicalSourceUrl: String? = null,
+    val lastObservedAt: String? = null,
+    val extractionMethod: String? = null
 )
 data class TenderDto(
     val id: Long, val filename: String, val userId: Long,
@@ -28,12 +32,13 @@ class AdminController(
     private val refreshJob: CatalogRefreshJob,
     private val userRepo: AppUserRepository,
     private val productRepo: ProductRepository,
-    private val tenderRepo: TenderRepository
+    private val tenderRepo: TenderRepository,
+    private val productPriceRepo: ProductPriceRepository
 ) {
 
     @PostMapping("/refresh")
     fun triggerRefresh(): ResponseEntity<Map<String, String>> {
-        refreshJob.refreshStaleSuppliers()
+        refreshJob.refresh()
         return ResponseEntity.ok(mapOf("status" to "refresh enqueued"))
     }
 
@@ -65,6 +70,7 @@ class AdminController(
             productRepo.searchByNameOrMpn(q, pageable)
         return PageResult(
             content = result.content.map { p ->
+                val price = productPriceRepo.findById(p.id).orElse(null)
                 ProductDto(
                     id = p.id,
                     name = p.name,
@@ -74,7 +80,10 @@ class AdminController(
                     productClass = p.productClass?.name,
                     isStale = p.isStale,
                     source = p.source,
-                    attributes = p.attributes.takeIf { it != "{}" }
+                    attributes = p.attributes.takeIf { it != "{}" },
+                    canonicalSourceUrl = p.canonicalSourceUrl,
+                    lastObservedAt = p.lastObservedAt?.toString(),
+                    extractionMethod = price?.extractionMethod
                 )
             },
             totalElements = result.totalElements

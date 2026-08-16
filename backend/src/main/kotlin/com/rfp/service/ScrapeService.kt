@@ -3,6 +3,10 @@ package com.rfp.service
 import com.microsoft.playwright.BrowserType
 import com.microsoft.playwright.Page
 import com.microsoft.playwright.Playwright
+import com.rfp.domain.CatalogIngest
+import com.rfp.repository.CatalogIngestRepository
+import com.rfp.repository.SupplierRepository
+import com.rfp.service.crawl.CrawlCoordinator
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.springframework.beans.factory.annotation.Autowired
@@ -11,6 +15,7 @@ import org.springframework.context.annotation.Lazy
 import org.springframework.scheduling.annotation.Async
 import org.springframework.stereotype.Service
 import java.net.URL
+import java.time.Instant
 import java.util.concurrent.TimeUnit
 
 data class CrawlResult(val content: String, val stepLog: String)
@@ -19,13 +24,77 @@ data class CrawlResult(val content: String, val stepLog: String)
 @Service
 open class ScrapeService(
     private val llmService: LlmService,
-    @Value("\${rfp.scraper.throttle-ms:1500}") val throttleMs: Long = 1500
+    @Value("\${rfp.scraper.throttle-ms:1500}") val throttleMs: Long = 1500,
+    @Value("\${rfp.scraper.adaptive-enabled:false}") val adaptiveEnabled: Boolean = false
 ) {
     @Autowired @Lazy lateinit var self: ScrapeService
 
+    /**
+     * Injected only when adaptive-enabled=true; lateinit so tests that override
+     * runScrapeJobAsync can construct ScrapeService without a CrawlCoordinator bean.
+     */
+    @Autowired @Lazy lateinit var coordinator: CrawlCoordinator
+
+    // Dependencies used only by the legacy scrape path (adaptive-enabled=false).
+    // Injected via @Autowired(required=false) so unit tests that override
+    // runScrapeJobAsync can construct ScrapeService without these beans.
+    @set:Autowired(required = false)
+    var legacySupplierRepo: SupplierRepository? = null
+
+    @set:Autowired(required = false)
+    var legacyIngestRepo: CatalogIngestRepository? = null
+
+    @set:Autowired(required = false)
+    @set:Lazy
+    var legacyIngestService: CatalogIngestService? = null
+
+    /**
+     * Entry point called by [com.rfp.job.CatalogRefreshJob] and any controller that
+     * triggers a supplier scrape.
+     *
+     * When [adaptiveEnabled] is **true**: delegates to [CrawlCoordinator.enqueue] and
+     * returns immediately — the durable, resumable crawler takes over.
+     *
+     * When [adaptiveEnabled] is **false** (default): runs the legacy Playwright-based
+     * pipeline inline via [legacyScrape].  The old Playwright code is preserved in
+     * [crawlWebsite] and is intentionally NOT removed during the rollout period.
+     */
     @Async("taskExecutor")
     open fun runScrapeJobAsync(supplierId: Long) {
-        // entry point kept for subclass override in tests
+        if (adaptiveEnabled) {
+            coordinator.enqueue(supplierId, null)
+        } else {
+            legacyScrape(supplierId)
+        }
+    }
+
+    /**
+     * Legacy Playwright crawl + ingest pipeline.  Mirrors the logic previously in
+     * [CatalogIngestService.ingestScrape], now consolidated here so the refresh job
+     * has a single entry point regardless of the feature flag.
+     *
+     * Called only when [adaptiveEnabled] is false.
+     */
+    private fun legacyScrape(supplierId: Long) {
+        val sr = legacySupplierRepo ?: error("SupplierRepository not wired (legacy scrape path)")
+        val ir = legacyIngestRepo   ?: error("CatalogIngestRepository not wired (legacy scrape path)")
+        val cs = legacyIngestService ?: error("CatalogIngestService not wired (legacy scrape path)")
+
+        val supplier = sr.findById(supplierId).orElseThrow { NoSuchElementException("Supplier $supplierId not found") }
+        val ingest = ir.save(
+            CatalogIngest(supplier = supplier, kind = "scrape", status = "RUNNING", startedAt = Instant.now())
+        )
+        try {
+            val crawl = crawlWebsite(
+                supplier.officialWebsite
+                    ?: throw IllegalStateException("No website for supplier ${supplier.name}")
+            )
+            ir.save(ingest.copy(stepLog = crawl.stepLog))
+            cs.runIngest(ingest.copy(stepLog = crawl.stepLog), crawl.content, "scrape")
+        } catch (e: Exception) {
+            ir.save(ingest.copy(status = "FAILED", errorMsg = e.message, finishedAt = Instant.now()))
+            sr.save(supplier.copy(scrapeStatus = "FAILED"))
+        }
     }
 
     private val httpClient = OkHttpClient.Builder()

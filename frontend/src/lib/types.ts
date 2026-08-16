@@ -8,6 +8,11 @@ export interface Supplier {
   description?: string;
   categories: string[];
   scrapeStatus: string;
+  crawlAllowedHosts?: string[];
+  crawlThrottleMs?: number | null;
+  crawlMaxConcurrency?: number | null;
+  crawlBatchPages?: number | null;
+  crawlMaxUrls?: number | null;
 }
 
 export interface AttributeVerdict {
@@ -146,4 +151,67 @@ export interface ProductSearchResult {
   price: number | null;
   currency: string;
   supplierName: string;
+}
+
+export interface CrawlRunSummary {
+  id: number;
+  status: 'QUEUED' | 'CRAWLING' | 'COMPLETE' | 'PARTIAL' | 'FAILED' | 'CANCELLED';
+  mode: string;
+  discoveredUrlCount: number;
+  fetchedUrlCount: number;
+  failedUrlCount: number;
+  observedProductCount: number;
+  insertedProductCount: number;
+  updatedProductCount: number;
+  completenessScore: number | null;
+  completenessReason: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  createdAt: string;
+}
+
+export interface CrawlCounts {
+  discovered: number;
+  fetched: number;
+  failed: number;
+  rejected: number;
+  retried: number;
+  pending: number;
+  observedProducts: number;
+  insertedProducts: number;
+  updatedProducts: number;
+  unchangedProducts: number;
+  staleProducts: number;
+}
+
+export interface Completeness {
+  canReconcile: boolean;
+  score: number | null;
+  reason: string | null;
+}
+
+export interface CrawlRunDetail {
+  id: number;
+  supplierId: number;
+  status: 'QUEUED' | 'CRAWLING' | 'COMPLETE' | 'PARTIAL' | 'FAILED' | 'CANCELLED';
+  mode: string;
+  configJson: string;
+  counts: CrawlCounts;
+  completeness: Completeness;
+  batchCount: number;
+  checkpointCount: number;
+  cancellationRequested: boolean;
+  failureCategory: string | null;
+  failureDetails: string | null;
+  startedAt: string | null;
+  heartbeatAt: string | null;
+  finishedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ProductProvenance {
+  canonicalSourceUrl: string | null;
+  lastObservedAt: string | null;
+  extractionMethod: string | null;
 }

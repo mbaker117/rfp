@@ -1,4 +1,4 @@
-import type { Supplier, RfpReport, AdminUser, AdminProduct, AdminTender, PageResult, IngestRecord, SelectedProduct, ProposalAlternative, ProposalLine, Proposal, ProductSearchResult } from './types';
+import type { Supplier, RfpReport, AdminUser, AdminProduct, AdminTender, PageResult, IngestRecord, SelectedProduct, ProposalAlternative, ProposalLine, Proposal, ProductSearchResult, CrawlRunSummary, CrawlRunDetail } from './types';
 
 const BASE = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080';
 
@@ -170,6 +170,38 @@ export const api = {
     async listIngests(supplierId: number, token: string): Promise<IngestRecord[]> {
       const res = await fetch(`${BASE}/suppliers/${supplierId}/ingests`, { headers: authHeaders(token) });
       return json<IngestRecord[]>(res);
+    },
+  },
+
+  crawl: {
+    async listRuns(supplierId: number, token: string): Promise<CrawlRunSummary[]> {
+      const res = await fetch(`${BASE}/suppliers/${supplierId}/crawl-runs`, { headers: authHeaders(token) });
+      return json<CrawlRunSummary[]>(res);
+    },
+    async getRun(runId: number, token: string): Promise<CrawlRunDetail> {
+      const res = await fetch(`${BASE}/crawl-runs/${runId}`, { headers: authHeaders(token) });
+      return json<CrawlRunDetail>(res);
+    },
+    async resume(runId: number, token: string): Promise<void> {
+      const res = await fetch(`${BASE}/crawl-runs/${runId}/resume`, {
+        method: 'POST',
+        headers: authHeaders(token),
+      });
+      if (!res.ok) throw new Error(`API error ${res.status}`);
+    },
+    async cancel(runId: number, token: string): Promise<void> {
+      const res = await fetch(`${BASE}/crawl-runs/${runId}/cancel`, {
+        method: 'POST',
+        headers: authHeaders(token),
+      });
+      if (!res.ok) throw new Error(`API error ${res.status}`);
+    },
+    async retryFailed(runId: number, token: string): Promise<void> {
+      const res = await fetch(`${BASE}/crawl-runs/${runId}/retry-failed`, {
+        method: 'POST',
+        headers: authHeaders(token),
+      });
+      if (!res.ok) throw new Error(`API error ${res.status}`);
     },
   },
 };

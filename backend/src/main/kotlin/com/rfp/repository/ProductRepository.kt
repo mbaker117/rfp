@@ -19,6 +19,7 @@ interface ProductRepository : JpaRepository<Product, Long> {
     fun findBySupplierIdAndMpnIgnoreCase(supplierId: Long, mpn: String): Product?
     fun findBySupplierIdAndNameIgnoreCase(supplierId: Long, name: String): Product?
     fun findBySupplierId(supplierId: Long): List<Product>
+    fun findBySupplierIdAndIdentityKey(supplierId: Long, identityKey: String): Product?
 
     @Query(
         value = """

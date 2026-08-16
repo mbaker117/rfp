@@ -99,9 +99,11 @@ open class CatalogIngestService(
             }
         }
 
-        // Mark products not seen in this run as stale
+        // Mark ingest-sourced products not seen in this run as stale.
+        // Exclude crawler-discovered products (canonicalSourceUrl != null) to prevent
+        // a PDF upload from staling products that were found by the adaptive crawler.
         productRepo.findBySupplierId(supplier.id)
-            .filter { it.id !in seenIds && !it.isStale }
+            .filter { it.id !in seenIds && !it.isStale && it.canonicalSourceUrl == null }
             .forEach { productRepo.save(it.copy(isStale = true)) }
 
         ingestRepo.save(ingest.copy(status = "DONE", itemsFound = seenIds.size, finishedAt = Instant.now(), stepLog = updatedLog))

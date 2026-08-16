@@ -19,6 +19,7 @@ data class CrawlRunConfig(
     val maxUrls: Int = MAX_URLS,
     val maxDurationMinutes: Int = MAX_DURATION_MINUTES,
     val maxAttempts: Int = MAX_ATTEMPTS,
+    val maxDepth: Int = MAX_DEPTH,
     val robotsFailClosed: Boolean = true,
     val allowedHosts: List<String> = emptyList(),
 ) {
@@ -39,6 +40,8 @@ data class CrawlRunConfig(
         const val MAX_DURATION_MINUTES = 24 * 60
         /** Maximum fetch attempts per URL before marking FAILED. */
         const val MAX_ATTEMPTS = 3
+        /** Maximum crawl depth from the seed URLs; links discovered beyond this depth are skipped. */
+        const val MAX_DEPTH = 10
 
         /**
          * Build a [CrawlRunConfig] by applying supplier-level fields, then [overrides], always enforcing ceilings.
@@ -66,6 +69,7 @@ data class CrawlRunConfig(
                 maxUrls = overrides?.maxUrls?.let { minOf(maxUrls, it) } ?: maxUrls,
                 maxDurationMinutes = overrides?.maxDurationMinutes?.let { minOf(maxDurationMinutes, it) } ?: maxDurationMinutes,
                 maxAttempts = overrides?.maxAttempts?.let { minOf(MAX_ATTEMPTS, it) } ?: MAX_ATTEMPTS,
+                maxDepth = overrides?.maxDepth?.let { minOf(MAX_DEPTH, it) } ?: MAX_DEPTH,
                 robotsFailClosed = overrides?.robotsFailClosed ?: robotsFailClosed,
                 allowedHosts = overrides?.allowedHosts ?: allowedHosts,
             )
@@ -88,6 +92,7 @@ data class CrawlRunOverrides(
     val maxUrls: Int? = null,
     val maxDurationMinutes: Int? = null,
     val maxAttempts: Int? = null,
+    val maxDepth: Int? = null,
     val robotsFailClosed: Boolean? = null,
     val allowedHosts: List<String>? = null,
 )

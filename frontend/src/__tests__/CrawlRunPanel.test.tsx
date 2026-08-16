@@ -21,14 +21,6 @@ const baseRun: CrawlRunDetail = {
   id: 1,
   status: 'PARTIAL',
   mode: 'FULL',
-  discoveredUrlCount: 5300,
-  fetchedUrlCount: 4800,
-  failedUrlCount: 12,
-  observedProductCount: 500,
-  insertedProductCount: 10,
-  updatedProductCount: 5,
-  completenessScore: 0.9,
-  completenessReason: 'Reached max URL limit',
   startedAt: '2024-01-01T10:00:00Z',
   finishedAt: '2024-01-01T11:00:00Z',
   createdAt: '2024-01-01T09:00:00Z',
@@ -37,7 +29,7 @@ const baseRun: CrawlRunDetail = {
   counts: baseCounts,
   completeness: {
     canReconcile: false,
-    score: 0.9,
+    score: 90,
     reason: 'Reached max URL limit',
   },
   batchCount: 5,
@@ -54,7 +46,6 @@ const partialRun: CrawlRunDetail = { ...baseRun, status: 'PARTIAL' };
 const completeRun: CrawlRunDetail = {
   ...baseRun,
   status: 'COMPLETE',
-  failedUrlCount: 0,
   counts: { ...baseCounts, failed: 0 },
 };
 

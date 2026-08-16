@@ -10,6 +10,7 @@ import org.springframework.beans.factory.annotation.Qualifier
 import org.springframework.scheduling.annotation.Scheduled
 import org.springframework.stereotype.Component
 import java.time.Instant
+import java.util.concurrent.ConcurrentSkipListSet
 import java.util.concurrent.Executor
 
 /**
@@ -34,6 +35,9 @@ class CrawlBatchJob(
         private const val RETRY_WAIT_MS = 30_000L
     }
 
+    /** Tracks which run IDs currently have a driver thread executing, to prevent duplicate submissions. */
+    private val inFlightRuns = ConcurrentSkipListSet<Long>()
+
     /**
      * Poll for QUEUED runs every 5 seconds and drive each on the crawl executor.
      * Also recovers abandoned claims for CRAWLING runs (worker-restart safety).
@@ -55,14 +59,23 @@ class CrawlBatchJob(
 
         for (run in activeRuns) {
             val runId = run.id
+            // Skip if a driver thread for this run is already executing (C3 — prevent duplicate threads)
+            if (!inFlightRuns.add(runId)) {
+                log.debug("Run $runId already being driven; skipping this tick")
+                continue
+            }
             executor.execute {
-                // Recover any abandoned claims before processing
                 try {
-                    coordinator.recoverAbandonedClaims(runId, Instant.now())
-                } catch (e: Exception) {
-                    log.warn("Claim recovery failed for run $runId", e)
+                    // Recover any abandoned claims before processing
+                    try {
+                        coordinator.recoverAbandonedClaims(runId, Instant.now())
+                    } catch (e: Exception) {
+                        log.warn("Claim recovery failed for run $runId", e)
+                    }
+                    driveRun(runId)
+                } finally {
+                    inFlightRuns.remove(runId)
                 }
-                driveRun(runId)
             }
         }
     }

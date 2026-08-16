@@ -65,6 +65,10 @@ class AdaptiveCrawlerIntegrationTest {
     private val pageParser = mockk<PageParser>()
     private val classifier = mockk<CrawlClassifier>()
     private val extractor = mockk<ProductPageExtractor>()
+    private val sitemapParser = mockk<SitemapParser>(relaxed = true)
+    private val crawlMetrics = mockk<CrawlMetrics>(relaxed = true)
+    private val completenessService = mockk<CrawlCompletenessService>(relaxed = true)
+    private val crawlReconciler = mockk<CrawlReconciler>(relaxed = true)
     private val canonicalizer = UrlCanonicalizer()
     private val objectMapper: ObjectMapper = ObjectMapper()
         .registerModule(KotlinModule.Builder().build())
@@ -114,6 +118,10 @@ class AdaptiveCrawlerIntegrationTest {
             classifier = classifier,
             extractor = extractor,
             canonicalizer = canonicalizer,
+            sitemapParser = sitemapParser,
+            crawlMetrics = crawlMetrics,
+            completenessService = completenessService,
+            crawlReconciler = crawlReconciler,
             objectMapper = objectMapper,
         )
     }
@@ -202,6 +210,10 @@ class AdaptiveCrawlerIntegrationTest {
             classifier = CrawlClassifier(null),  // JSON-LD path never calls LLM
             extractor = ProductPageExtractor(mockLlm),
             canonicalizer = canonicalizer,
+            sitemapParser = sitemapParser,
+            crawlMetrics = crawlMetrics,
+            completenessService = completenessService,
+            crawlReconciler = crawlReconciler,
             objectMapper = objectMapper,
         )
 

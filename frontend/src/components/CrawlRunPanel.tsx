@@ -29,7 +29,7 @@ export function CrawlRunPanel({ run, onAction }: Props) {
   const isTerminal = TERMINAL_STATUSES.has(run.status);
   const canResume = run.status === 'PARTIAL' || run.status === 'FAILED';
   const canCancel = run.status === 'QUEUED' || run.status === 'CRAWLING';
-  const canRetry = (run.status === 'PARTIAL' || run.status === 'FAILED') && run.failedUrlCount > 0;
+  const canRetry = (run.status === 'PARTIAL' || run.status === 'FAILED') && run.counts.failed > 0;
 
   async function handleAction(action: 'resume' | 'cancel' | 'retry-failed') {
     setPending(true);
@@ -42,8 +42,8 @@ export function CrawlRunPanel({ run, onAction }: Props) {
 
   const badgeClass = STATUS_BADGE[run.status] ?? 'bg-slate-100 text-slate-500';
 
-  const score = run.completenessScore;
-  const reason = run.completenessReason;
+  const score = run.completeness.score;
+  const reason = run.completeness.reason;
 
   return (
     <div className="border border-slate-200 rounded-xl p-4 space-y-3 text-sm">
@@ -69,17 +69,17 @@ export function CrawlRunPanel({ run, onAction }: Props) {
 
       {/* Counts */}
       <div className="flex flex-wrap gap-x-6 gap-y-1 text-xs text-slate-600">
-        <span>{fmt(run.discoveredUrlCount)} discovered</span>
-        <span>{fmt(run.fetchedUrlCount)} fetched</span>
-        {run.failedUrlCount > 0 && (
-          <span className="text-red-600">{fmt(run.failedUrlCount)} failed</span>
+        <span>{fmt(run.counts.discovered)} discovered</span>
+        <span>{fmt(run.counts.fetched)} fetched</span>
+        {run.counts.failed > 0 && (
+          <span className="text-red-600">{fmt(run.counts.failed)} failed</span>
         )}
-        <span>{fmt(run.observedProductCount)} products observed</span>
-        {run.insertedProductCount > 0 && (
-          <span className="text-emerald-600">{fmt(run.insertedProductCount)} inserted</span>
+        <span>{fmt(run.counts.observedProducts)} products observed</span>
+        {run.counts.insertedProducts > 0 && (
+          <span className="text-emerald-600">{fmt(run.counts.insertedProducts)} inserted</span>
         )}
-        {run.updatedProductCount > 0 && (
-          <span className="text-indigo-600">{fmt(run.updatedProductCount)} updated</span>
+        {run.counts.updatedProducts > 0 && (
+          <span className="text-indigo-600">{fmt(run.counts.updatedProducts)} updated</span>
         )}
       </div>
 
@@ -87,7 +87,7 @@ export function CrawlRunPanel({ run, onAction }: Props) {
       {(score != null || reason) && (
         <div className="text-xs text-slate-500">
           {score != null
-            ? `Completeness: ${Math.round(score * 100)}%`
+            ? `Completeness: ${score}%`
             : reason}
         </div>
       )}

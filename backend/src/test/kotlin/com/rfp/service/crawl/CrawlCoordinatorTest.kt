@@ -40,6 +40,10 @@ class CrawlCoordinatorTest(
     private val pageParser: PageParser = mockk()
     private val classifier: CrawlClassifier = mockk()
     private val extractor: ProductPageExtractor = mockk()
+    private val sitemapParser: SitemapParser = mockk(relaxed = true)
+    private val crawlMetrics: CrawlMetrics = mockk(relaxed = true)
+    private val completenessService: CrawlCompletenessService = mockk(relaxed = true)
+    private val crawlReconciler: CrawlReconciler = mockk(relaxed = true)
 
     private val objectMapper: ObjectMapper = ObjectMapper()
         .registerModule(KotlinModule.Builder().build())
@@ -62,6 +66,10 @@ class CrawlCoordinatorTest(
             classifier = classifier,
             extractor = extractor,
             canonicalizer = UrlCanonicalizer(),
+            sitemapParser = sitemapParser,
+            crawlMetrics = crawlMetrics,
+            completenessService = completenessService,
+            crawlReconciler = crawlReconciler,
             objectMapper = objectMapper,
         )
 
@@ -192,6 +200,10 @@ class CrawlCoordinatorTest(
             classifier = classifier,
             extractor = extractor,
             canonicalizer = UrlCanonicalizer(),
+            sitemapParser = sitemapParser,
+            crawlMetrics = crawlMetrics,
+            completenessService = completenessService,
+            crawlReconciler = crawlReconciler,
             objectMapper = objectMapper,
         )
 

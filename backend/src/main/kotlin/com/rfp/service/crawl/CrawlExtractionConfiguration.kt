@@ -44,4 +44,7 @@ class CrawlExtractionConfiguration {
         urlCanonicalizer: UrlCanonicalizer,
         crawlRobotsPolicyService: RobotsPolicyService,
     ): CrawlFetcher = CrawlFetcher(crawlOkHttpClient, crawlPolicy, urlCanonicalizer, crawlRobotsPolicyService)
+
+    @Bean
+    fun sitemapParser(urlCanonicalizer: UrlCanonicalizer): SitemapParser = SitemapParser(urlCanonicalizer)
 }

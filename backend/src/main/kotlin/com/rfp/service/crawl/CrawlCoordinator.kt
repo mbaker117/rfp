@@ -14,6 +14,7 @@ import com.rfp.repository.CrawlRunRepository
 import com.rfp.repository.CrawlUrlRepository
 import com.rfp.repository.SupplierRepository
 import org.slf4j.LoggerFactory
+import org.springframework.context.annotation.Lazy
 import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.stereotype.Service
 import java.net.URI
@@ -67,6 +68,10 @@ class CrawlCoordinator(
     private val classifier: CrawlClassifier,
     private val extractor: ProductPageExtractor,
     private val canonicalizer: UrlCanonicalizer,
+    private val sitemapParser: SitemapParser,
+    private val crawlMetrics: CrawlMetrics,
+    private val completenessService: CrawlCompletenessService,
+    @Lazy private val crawlReconciler: CrawlReconciler,
     private val objectMapper: ObjectMapper,
     private val clock: Clock = Clock.systemUTC(),
 ) {
@@ -349,11 +354,21 @@ class CrawlCoordinator(
         crawlUrl.updatedAt = clock.instant()
         urlRepo.save(crawlUrl)
         stats.fetched++
+        crawlMetrics.incrementFetchOutcome("success", result.method.name.lowercase())
+
+        // Sitemap pages are parsed by SitemapParser, not the HTML PageParser
+        if (crawlUrl.pageType == CrawlPageType.SITEMAP) {
+            handleSitemapSuccess(result, crawlUrl, run, supplierRoot, config, stats)
+            return
+        }
 
         val parsedPage: ParsedPage = try {
             pageParser.parse(result)
         } catch (e: Exception) {
             log.warn("Parse failed for ${crawlUrl.normalizedUrl}", e)
+            crawlUrl.status = CrawlUrlStatus.SKIPPED
+            crawlUrl.updatedAt = clock.instant()
+            urlRepo.save(crawlUrl)
             return
         }
 
@@ -361,6 +376,9 @@ class CrawlCoordinator(
             classifier.classify(parsedPage)
         } catch (e: Exception) {
             log.warn("Classification failed for ${crawlUrl.normalizedUrl}", e)
+            crawlUrl.status = CrawlUrlStatus.SKIPPED
+            crawlUrl.updatedAt = clock.instant()
+            urlRepo.save(crawlUrl)
             return
         }
 
@@ -373,6 +391,7 @@ class CrawlCoordinator(
         }
 
         // Extract observations for product and listing pages
+        var observedThisUrl = 0
         if (classification.type == CrawlPageType.PRODUCT || classification.type == CrawlPageType.LISTING) {
             try {
                 val observations = extractor.extract(parsedPage, emptyList<ClassSchema>())
@@ -397,11 +416,57 @@ class CrawlCoordinator(
                         )
                     )
                     stats.observed++
+                    observedThisUrl++
+                    crawlMetrics.incrementExtractionYield(obs.method.name.lowercase())
                 }
             } catch (e: Exception) {
                 log.warn("Extraction failed for ${crawlUrl.normalizedUrl}", e)
             }
         }
+
+        // Advance URL to terminal status (I3)
+        crawlUrl.status = if (observedThisUrl > 0) CrawlUrlStatus.EXTRACTED else CrawlUrlStatus.SKIPPED
+        crawlUrl.updatedAt = clock.instant()
+        urlRepo.save(crawlUrl)
+    }
+
+    /** Parse a sitemap page and enqueue the discovered URLs. */
+    private fun handleSitemapSuccess(
+        result: FetchResult.Success,
+        crawlUrl: CrawlUrl,
+        run: CrawlRun,
+        supplierRoot: URI,
+        config: CrawlRunConfig,
+        stats: BatchStats,
+    ) {
+        val bodyText = String(result.body, Charsets.UTF_8)
+        try {
+            when (val sitemapResult = sitemapParser.parse(bodyText)) {
+                is SitemapResult.Index -> {
+                    // Sitemap index — enqueue each child sitemap as SITEMAP type
+                    for (ref in sitemapResult.sitemaps) {
+                        enqueueDiscovered(
+                            ref.uri, run, crawlUrl, 75, supplierRoot, config, stats,
+                            pageType = CrawlPageType.SITEMAP,
+                        )
+                    }
+                }
+                is SitemapResult.Urls -> {
+                    // URL set — enqueue each URL for crawling
+                    for (sitemapUrl in sitemapResult.urls) {
+                        enqueueDiscovered(
+                            sitemapUrl.uri, run, crawlUrl, 50, supplierRoot, config, stats,
+                        )
+                    }
+                }
+            }
+            crawlUrl.status = CrawlUrlStatus.EXTRACTED
+        } catch (e: SitemapParseException) {
+            log.warn("Sitemap parse failed for ${crawlUrl.normalizedUrl}: ${e.message}")
+            crawlUrl.status = CrawlUrlStatus.SKIPPED
+        }
+        crawlUrl.updatedAt = clock.instant()
+        urlRepo.save(crawlUrl)
     }
 
     private fun enqueueDiscovered(
@@ -412,9 +477,12 @@ class CrawlCoordinator(
         supplierRoot: URI,
         config: CrawlRunConfig,
         stats: BatchStats,
+        pageType: CrawlPageType = CrawlPageType.UNKNOWN,
     ) {
         if (!isAllowedScheme(uri)) return
         if (!isAllowedHost(uri, supplierRoot, config.allowedHosts)) return
+        val childDepth = parentUrl.depth + 1
+        if (childDepth > config.maxDepth) return
         val normalized = canonicalizer.resolveAndNormalize(uri, uri.toString()) ?: return
         val host = normalized.host ?: return
         try {
@@ -425,8 +493,8 @@ class CrawlCoordinator(
                     normalizedUrl = normalized.toString(),
                     host = host,
                     status = CrawlUrlStatus.PENDING,
-                    pageType = CrawlPageType.UNKNOWN,
-                    depth = parentUrl.depth + 1,
+                    pageType = pageType,
+                    depth = childDepth,
                     priority = priority,
                     parentUrl = parentUrl.normalizedUrl,
                 )
@@ -444,7 +512,16 @@ class CrawlCoordinator(
         stats: BatchStats,
     ) {
         val attempts = crawlUrl.attemptCount + 1
-        if (result.retryable && attempts < config.maxAttempts) {
+        // Policy and robots rejections are permanent — mark REJECTED, not FAILED
+        if (result.error == FetchError.POLICY_REJECTED || result.error == FetchError.ROBOTS_DISALLOWED) {
+            crawlUrl.status = CrawlUrlStatus.REJECTED
+            crawlUrl.attemptCount = attempts
+            crawlUrl.errorCategory = result.error.name
+            crawlUrl.updatedAt = clock.instant()
+            urlRepo.save(crawlUrl)
+            stats.rejected++
+            crawlMetrics.incrementFetchOutcome("rejected", "http")
+        } else if (result.retryable && attempts < config.maxAttempts) {
             val backoffDuration = result.retryAfter ?: Duration.ofMillis(calculateBackoffMs(attempts))
             crawlUrl.status = CrawlUrlStatus.RETRY
             crawlUrl.attemptCount = attempts
@@ -453,6 +530,8 @@ class CrawlCoordinator(
             crawlUrl.updatedAt = clock.instant()
             urlRepo.save(crawlUrl)
             stats.retried++
+            crawlMetrics.incrementFetchRetry()
+            crawlMetrics.incrementFetchOutcome("error", "http")
         } else {
             crawlUrl.status = CrawlUrlStatus.FAILED
             crawlUrl.attemptCount = attempts
@@ -460,6 +539,7 @@ class CrawlCoordinator(
             crawlUrl.updatedAt = clock.instant()
             urlRepo.save(crawlUrl)
             stats.failed++
+            crawlMetrics.incrementFetchOutcome("error", "http")
         }
     }
 
@@ -478,6 +558,7 @@ class CrawlCoordinator(
         run.fetchedUrlCount += stats.fetched
         run.failedUrlCount += stats.failed
         run.retriedUrlCount += stats.retried
+        run.rejectedUrlCount += stats.rejected
         run.discoveredUrlCount += stats.discovered
         run.observedProductCount += stats.observed
         run.heartbeatAt = clock.instant()
@@ -490,6 +571,26 @@ class CrawlCoordinator(
         run.finishedAt = clock.instant()
         run.updatedAt = clock.instant()
         runRepo.save(run)
+
+        // Compute and persist completeness score (I2), then drive reconciliation (C1a)
+        if (status == CrawlRunStatus.COMPLETE) {
+            try {
+                val completeness = completenessService.evaluate(run.id)
+                val freshRun = runRepo.findById(run.id).orElse(null)
+                if (freshRun != null) {
+                    freshRun.completenessScore = completeness.score
+                    freshRun.completenessReason = completeness.reason
+                    freshRun.updatedAt = clock.instant()
+                    runRepo.save(freshRun)
+                }
+                // Reconcile observations into the product catalogue
+                crawlReconciler.reconcile(run.id)
+            } catch (e: Exception) {
+                log.error("Post-completion reconciliation failed for run ${run.id}", e)
+            }
+        }
+
+        crawlMetrics.incrementRunCompleted(status.name.lowercase())
         return outcome
     }
 
@@ -518,9 +619,10 @@ class CrawlCoordinator(
         var fetched: Int = 0,
         var failed: Int = 0,
         var retried: Int = 0,
+        var rejected: Int = 0,
         var discovered: Int = 0,
         var observed: Int = 0,
     ) {
-        fun isZero() = fetched == 0 && failed == 0 && retried == 0 && discovered == 0 && observed == 0
+        fun isZero() = fetched == 0 && failed == 0 && retried == 0 && rejected == 0 && discovered == 0 && observed == 0
     }
 }

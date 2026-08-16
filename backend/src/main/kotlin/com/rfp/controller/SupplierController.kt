@@ -18,6 +18,7 @@ import jakarta.validation.constraints.Max
 import jakarta.validation.constraints.Min
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.http.ResponseEntity
+import org.springframework.security.access.prepost.PreAuthorize
 import org.springframework.security.core.Authentication
 import org.springframework.web.bind.annotation.*
 import org.springframework.web.multipart.MultipartFile
@@ -166,6 +167,7 @@ class SupplierController(
     }
 
     @PutMapping("/{id}")
+    @PreAuthorize("hasRole('ADMIN')")
     fun update(@PathVariable id: Long, @Valid @RequestBody req: SupplierRequest): ResponseEntity<SupplierResponse> {
         val existing = repo.findById(id).orElse(null) ?: return ResponseEntity.notFound().build()
         val updated = repo.save(

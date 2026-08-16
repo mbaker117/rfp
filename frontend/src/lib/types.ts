@@ -136,8 +136,11 @@ export interface Completeness {
   reason: string | null;
 }
 
-export interface CrawlRunDetail extends CrawlRunSummary {
+export interface CrawlRunDetail {
+  id: number;
   supplierId: number;
+  status: 'QUEUED' | 'CRAWLING' | 'COMPLETE' | 'PARTIAL' | 'FAILED' | 'CANCELLED';
+  mode: string;
   configJson: string;
   counts: CrawlCounts;
   completeness: Completeness;
@@ -146,7 +149,10 @@ export interface CrawlRunDetail extends CrawlRunSummary {
   cancellationRequested: boolean;
   failureCategory: string | null;
   failureDetails: string | null;
+  startedAt: string | null;
   heartbeatAt: string | null;
+  finishedAt: string | null;
+  createdAt: string;
   updatedAt: string;
 }
 

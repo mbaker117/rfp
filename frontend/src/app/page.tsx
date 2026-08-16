@@ -121,6 +121,9 @@ export default function Home() {
       <nav className="bg-white border-b border-slate-200 px-6 py-3 flex items-center justify-between">
         <span className="font-semibold text-slate-900">RFP Matching</span>
         <div className="flex items-center gap-4">
+          <a href="/my-rfps" className="text-sm text-slate-500 hover:text-indigo-600 transition-colors">
+            My RFPs →
+          </a>
           <a href="/admin" className="text-sm text-slate-500 hover:text-indigo-600 transition-colors">
             Admin →
           </a>

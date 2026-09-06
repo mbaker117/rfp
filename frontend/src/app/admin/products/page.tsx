@@ -98,6 +98,12 @@ export default function AdminProductsPage() {
                     {p.isStale && (
                       <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-700">stale</span>
                     )}
+                    {!p.isStale && p.crawlerStale && (
+                      <span
+                        title="A completed crawl no longer found this product on the supplier site"
+                        className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-orange-100 text-orange-700"
+                      >gone from site</span>
+                    )}
                   </td>
                 </tr>
                 {expandedId === p.id && p.attributes && (

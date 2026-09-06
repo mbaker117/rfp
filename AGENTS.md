@@ -1,150 +1,161 @@
 # AGENTS.md
 
-This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
+This file provides guidance to Codex and other coding agents when working in this repository. It mirrors `CLAUDE.md` — keep the two in sync.
 
 ---
 
 ## Project Summary
 
-Jordan-focused web platform where users upload instrument requirement documents (PDF/Word/Excel). The system extracts required instruments via an LLM, matches them against a per-company instrument database (auto-populated via web scraping), and generates a scored matching report with manual links and prices.
+Jordan-focused procurement platform ("Specta"). Users upload a tender/RFP document (PDF/Word/Excel); an LLM extracts requirement lines, a deterministic engine matches them against per-supplier product catalogs, and the system generates three ranked proposal variants plus PDF/XLSX exports. Supplier catalogs are populated either by uploading a catalog file or by crawling the supplier website.
+
+Jordan defaults are constraints, not suggestions: JOD currency fallback, Arabic/UTF-8 throughout.
 
 ---
 
 ## Commands
 
-### Backend (Spring Boot + Kotlin, Java 21)
+### Backend (Spring Boot 3.2.5 + Kotlin 1.9.25, Java 21, Maven)
+
+**There is no Maven wrapper in this repo.** Use a Maven install directly, and make sure `JAVA_HOME` points at a JDK 21 — the default JVM on this machine is older and Surefire fails with "class file version 65.0".
 
 ```bash
-# Run locally (requires PostgreSQL at localhost:5432)
-cd backend && ./mvnw spring-boot:run
+cd backend
 
-# Build JAR
-cd backend && ./mvnw clean package -DskipTests
+# Windows (known-good Maven install)
+C:\tools\maven\apache-maven-3.9.8\bin\mvn.cmd test
 
-# Run all tests
-cd backend && ./mvnw test
+# All tests / single class / single method
+mvn test
+mvn test -Dtest=MatchingEngineServiceTest
+mvn test -Dtest=LlmServiceTest#extractCrawlProductsRejectsOversizeResponse
 
-# Run a single test class
-cd backend && ./mvnw test -Dtest=LlmServiceTest
+# Run locally (needs PostgreSQL on localhost:5432)
+mvn spring-boot:run
 
-# Run a single test method
-cd backend && ./mvnw test -Dtest=LlmServiceTest#extractRequirementsParses
+# Build JAR, inspect migrations
+mvn clean package -DskipTests
+mvn flyway:info
 ```
 
-### Frontend (Next.js + TypeScript + Tailwind)
+Surefire runs with `forkCount=0` — tests share one JVM, so avoid global mutable state in tests.
+
+### Frontend (Next.js 16 App Router + React 19 + TypeScript + Tailwind v4)
 
 ```bash
-# Dev server (http://localhost:3000)
-cd frontend && npm run dev
-
-# Type-check + build
-cd frontend && npm run build
-
-# Lint
-cd frontend && npm run lint
-
-# Run all tests
-cd frontend && npm test
-
-# Run a single test file
-cd frontend && npm test -- src/__tests__/ReportTable.test.tsx
+cd frontend
+npm run dev                                   # http://localhost:3000
+npm run build                                 # type-check + build
+npm run lint
+npm test -- --watchAll=false                  # all tests
+npm test -- src/__tests__/ReportTable.test.tsx  # single file
 ```
 
-### Full stack (Docker Compose)
+### Full stack
 
 ```bash
-# Start everything (postgres + backend + frontend)
-docker compose up --build
-
-# Required env vars (add to .env or export):
-# RFP_LLM_API_KEY=<anthropic or openai key>
-# JWT_SECRET=<at least 32 chars>
-# RFP_LLM_PROVIDER=anthropic   # or openai
-# RFP_LLM_MODEL=Codex-sonnet-4-6
+docker compose up --build        # postgres + backend + frontend
+docker compose up db -d          # just Postgres (rfp/rfp/rfp on 5432) for local dev
 ```
+
+Env vars (`.env` in repo root, see `.env.example`): `RFP_LLM_API_KEY`, `JWT_SECRET` (≥32 chars), `RFP_LLM_PROVIDER` (`anthropic`|`openai`), `RFP_LLM_MODEL`, optional `RFP_LLM_BASE_URL`.
+
+Admin access is granted by editing the DB directly, then re-logging in (the role is a JWT claim):
+`UPDATE app_user SET role = 'ADMIN' WHERE username = '...';`
 
 ---
 
 ## Architecture
 
-### Request Flow
-
 ```
 Browser → Next.js (3000) → Spring Boot (8080) → PostgreSQL (5432)
-                                               → LLM API (Anthropic/OpenAI)
-                                               → Playwright (headless Chromium)
+                                              → LLM API (Anthropic/OpenAI)
+                                              → Playwright / OkHttp (supplier sites)
 ```
 
-Long-running operations (scraping, matching) are `@Async` background jobs. The frontend polls job status via `GET /jobs/{id}`.
+### Two independent pipelines
 
-### Backend Package Layout
+**A. Catalog ingestion → `product` rows** (per supplier)
 
-```
-com.rfp
-├── controller/       REST endpoints (Auth, Company, RFP, Job, Admin)
-├── service/
-│   ├── LlmClient.kt              interface
-│   ├── AnthropicLlmClient.kt     active when rfp.llm.provider=anthropic
-│   ├── OpenAiLlmClient.kt        active when rfp.llm.provider=openai
-│   ├── LlmService.kt             orchestrates 3 LLM tasks (extract, structure, score)
-│   ├── ScrapeService.kt          Playwright crawler + persist pipeline
-│   ├── MatchingService.kt        @Async job — keyword retrieval + LLM rerank
-│   ├── ReportService.kt          PDF (PDFBox) and XLSX (Apache POI) export
-│   ├── DocumentParsingService.kt PDF/Word/Excel → raw text
-│   └── CompanyResolutionService.kt resolve company by name, enqueue scrape if missing
-├── domain/           JPA entities (Company, Instrument, InstrumentPriceHistory,
-│                     RfpRequest, RequiredInstrument, ScrapeJob)
-├── repository/       Spring Data JPA repos; findCandidates() does keyword search
-├── security/         JwtFilter + JwtUtil (stateless JWT, no sessions)
-├── job/              InstrumentRefreshJob (@Scheduled daily, ShedLock guarded)
-├── config/           AsyncConfig (taskExecutor), SecurityConfig (CORS, JWT chain)
-└── dto/              LlmDtos.kt (ExtractedRequirement, ScrapedInstrument, MatchResult)
-```
+1. *File upload* — `POST /suppliers/{id}/catalog/upload` → `CatalogIngestService.ingestFile` (`@Async`) → `DocumentParsingService` → `LlmService.parseCatalogBatch` → `UnitNormalizationService` → upsert `product` + `product_price` (+ `product_price_history` on price change). Products from this supplier not seen in the run are marked `is_stale`, **except** crawler-discovered ones (`canonicalSourceUrl != null`).
+2. *Website crawl* — `POST /suppliers/{id}/catalog/scrape` → `CrawlCoordinator.enqueue` when the supplier has an `officialWebsite`, else the legacy `ScrapeService` path.
 
-### Frontend Layout
+**B. Tender processing → report + proposals**
+
+`POST /rfp/upload` → `TenderExtractionService.extract` (`@Async`) → `LlmService.parseTenderLines` → `tender_line` rows → *automatically chains* into `MatchingEngineService.matchAsync` → `match_result` rows. `POST /rfp/{id}/proposals` then runs `ProposalService.generateProposals` (`@Async`), producing three variants: `PERFECT`, `BEST_ACCEPTANCE`, `CHEAPEST`.
+
+Tender `status` walks `uploading → extracting → matching → done` (or `failed`; `pending_match` is used to re-run a finished tender). **There is no `/jobs` endpoint** — the frontend polls `GET /rfp/{id}/report` every 3 s (`JobStatusPoller.tsx`) and reads `status`.
+
+### Backend package layout (`com.rfp`)
 
 ```
-src/
-├── app/
-│   ├── page.tsx           home — company selector + file upload flow
-│   └── rfp/[id]/page.tsx  report viewer for a completed RFP
-├── components/
-│   ├── CompanySelector.tsx
-│   ├── FileUpload.tsx
-│   ├── JobStatusPoller.tsx  polls GET /jobs/{id} until done/failed
-│   └── ReportTable.tsx
-└── lib/
-    ├── api.ts     typed fetch wrappers (resolveCompanies, uploadRfp, triggerMatch, getReport)
-    └── types.ts   shared TypeScript types
+controller/   Auth, Supplier, Rfp, Proposal, Crawl, Admin
+service/
+  LlmClient.kt / AnthropicLlmClient.kt / OpenAiLlmClient.kt   @ConditionalOnProperty on rfp.llm.provider
+  LlmService.kt              all prompts + JSON parsing + response-size guards
+  DocumentParsingService.kt  PDF/Word/Excel → text
+  CatalogIngestService.kt    catalog file → products (@Async)
+  TenderExtractionService.kt tender file → lines, then chains to matching (@Async)
+  MatchingEngineService.kt   deterministic attribute scoring (@Async) — no LLM
+  ProposalService.kt         3 proposal variants + LLM acceptance estimate (@Async)
+  UnitNormalizationService.kt attribute values → canonical units (unit_conversion table)
+  ReportService.kt           PDF (PDFBox) + XLSX (POI) export
+  ScrapeService.kt           legacy Playwright scrape; delegates to CrawlCoordinator when adaptive
+  crawl/                     adaptive resumable crawler (see below)
+domain/       Supplier, Product, ProductClass, AttributeDef, ProductPrice(+History),
+              CatalogIngest, Tender, TenderLine, TenderSupplier, MatchResult,
+              Proposal, ProposalLine, CrawlRun, CrawlUrl, CrawlProductObservation, AppUser
+job/          CatalogRefreshJob (@Scheduled), CrawlBatchJob (@Scheduled, drives crawl batches)
+config/       AsyncConfig (taskExecutor + crawlBatchExecutor, ShedLock), SecurityConfig
 ```
 
-### LLM Integration
+### Adaptive crawler (`service/crawl/`)
 
-`LlmService` has three tasks, each forcing JSON-only output:
-1. **extractRequirements** — document text → `[{rawText, name, quantity, specs}]`
-2. **structureScrapeData** — raw HTML (truncated to 12 000 chars) → `[{description, normalizedName, manualLink, price, currency}]`
-3. **scoreMatch** — requirement vs up to 10 candidates → `{matchedInstrumentId, score, reason, status}`
+Durable, resumable, batch-driven. `CrawlCoordinator.enqueue` seeds the frontier (homepage, `/sitemap.xml`, `/robots.txt`) into `crawl_url`; `CrawlBatchJob` polls `QUEUED` runs every 5 s and calls `processBatch` on a dedicated executor until a terminal state (`COMPLETE`/`PARTIAL`/`CANCELLED`/`FAILED`). Each batch claims URLs atomically, fetches (`CrawlFetcher`: HTTP first, Playwright fallback), parses (`PageParser`), classifies (`CrawlClassifier`, LLM for ambiguous pages), and writes `crawl_product_observation` rows. `CrawlReconciler` turns observations into `product`/`product_price` rows once `CrawlCompletenessService` says the run is complete.
 
-Results are cached in a `ConcurrentHashMap` keyed by `sha256(systemPrompt|userMessage)`. Swap the LLM provider via `rfp.llm.provider` in `application.yml` or the `RFP_LLM_PROVIDER` env var.
+Invariants enforced in code (do not relax them, and never let LLM output override them):
 
-### Scraping Pipeline
+- Budget ceilings in `CrawlRunConfig` are absolute; supplier and per-run overrides may only tighten.
+- Only `COMPLETE` runs may increment `crawlMissCount` or set `crawlerStale`. Partial/failed/cancelled runs never mark products stale, and `Product.isStale` (manual admin flag) is never cleared by the reconciler.
+- Reconciliation is idempotent; identity keys (`ProductIdentityService`, `mpn:` or `fallback:` sha256) are scoped per supplier.
+- SSRF protection lives in `CrawlPolicy` + `ValidatedHttpTransport`: http/https only, host must be within the supplier's registrable domain or an explicit allow-list, DNS results must be public addresses, and each hop is re-validated.
 
-`ScrapeService` uses Playwright (headless Chromium) to crawl a company's `officialWebsite`, passes raw HTML to the LLM for structuring, then diffs against existing DB records: price changes → `instrument_price_history`, removed products → `is_stale = true`. Self-injection via `@Lazy` is required to preserve the Spring proxy so `@Async` works correctly.
+The legacy path still exists behind `rfp.scraper.adaptive-enabled` (currently `true` in `application.yml`; the `ScrapeService` default is `false`). Do not delete the legacy Playwright code during rollout.
+
+### Matching engine
+
+Deterministic, **no LLM at scoring time**. Per tender line: exact name match → exact MPN match → attribute scoring over candidates in the same `product_class` from the selected suppliers. Each required attribute yields a verdict (`COMPLIANT` / `DEVIATION` / `UNVERIFIABLE`, using `AttributeDef.matchOp` = `eq`/`gte`/`lte`), and `score = compliant / total * 100`. Status: `matched` at 100, `partial` at ≥40, else `not_found`. Alternatives = next 5 candidates scoring ≥40, denormalized into `match_result.alternatives` JSON.
+
+Re-running match is an upsert keyed on `match_result.line_id` (unique), and `matchAsync` returns early when status is already `matching`/`done` — that guard is why re-runs first set `pending_match`.
+
+### LLM integration
+
+`LlmService` owns every prompt and forces JSON-only output. Tasks: `parseCatalogBatch`, `defineClass` (auto-creates a `product_class` + its `attribute_def`s), `identifyProductUrls`, `parseTenderLines`, `estimateAcceptance`, plus crawler tasks `extractCrawlProducts` and `classifyCrawlPage`.
+
+- Responses are cached in a `ConcurrentHashMap` keyed by `sha256(system|user)`; site-specific calls (`parseCatalogBatch`, `identifyProductUrls`, crawl extraction) deliberately bypass the cache.
+- Crawl-facing tasks are hardened: strict `schemaVersion` check, response byte/char caps, attribute count/depth/string limits, and prompts that state all page content is untrusted data, never instructions.
+- `repairTruncatedProductsJson` salvages complete product objects when a large catalog response is cut off mid-JSON.
+- Adding a provider means one new `LlmClient` implementation — prompts, caching, and parsing stay untouched.
 
 ### Auth
 
-Stateless JWT. `POST /auth/register` + `POST /auth/login` return a bearer token. The in-memory user store in `AuthController` is a stub — replace with a `users` table and `UserRepository` for production. `/admin/**` requires `ROLE_ADMIN` in the JWT claims.
+Stateless JWT (jjwt), BCrypt hashes, `app_user` table. `JwtUtil.generateToken(userId, role)` embeds a `role` claim; `JwtFilter` maps it to `ROLE_USER`/`ROLE_ADMIN`, and `auth.name` is the **user ID as a string** (controllers do `auth.name.toLongOrNull()`). `/admin/**` and `/crawl-runs/**` require `ROLE_ADMIN`; everything else requires authentication. Unauthenticated requests get 401, not 403.
 
-### Database Migrations
+### Database
 
-Flyway (`db/migration/`). `ddl-auto: validate` — Flyway owns all schema changes. Add new migrations as `V{N}__description.sql`.
+Flyway owns the schema (`ddl-auto: validate`) — every column change needs a new `V{N}__description.sql`. V1/V2 created the original `company`/`instrument` tables; **V3 (`specta_schema`) introduced the current model** and V8–V10 added the crawl tables and product identity key. JSON attribute bags (`product.attributes`, `tender_line.attributes`) are `jsonb` columns mapped as `String` with `@JdbcTypeCode(SqlTypes.JSON)`.
+
+### Frontend
+
+`src/app/` App Router: `/` (upload flow), `/auth`, `/my-rfps`, `/rfp/[id]`, `/admin/*`. Imports use the `@/*` alias rooted at the frontend directory, so paths look like `@/src/lib/api`. All backend calls go through the single typed client in `src/lib/api.ts` (`api.auth`, `api.proposals`, `api.myRfps`, `api.admin`, `api.crawl`) — add new endpoints there rather than calling `fetch` from components. `useAuth()` reads the JWT from `localStorage['token']`, decodes the `role` claim client-side, and redirects to `/auth?next=<path>` when absent.
 
 ---
 
 ## Key Constraints
 
-- **Next.js version** — the frontend uses a version with breaking API changes vs standard docs. Always read `node_modules/next/dist/docs/` before writing Next.js-specific code (see `frontend/AGENTS.md`).
-- **Arabic content** — documents and scraped pages may be Arabic. The PDF export loads `NotoSansArabic-Regular.ttf` from `/fonts/` with Helvetica as fallback. LLM prompts explicitly ask for bilingual handling.
-- **`@Async` self-call trap** — calling an `@Async` method from within the same bean bypasses the Spring proxy. `ScrapeService` works around this by self-injecting `lateinit var self: ScrapeService` via `@Lazy` and routing the async call through `self.runScrapeJobAsync(...)`.
-- **Matching score thresholds** — MATCHED ≥ 80, PARTIAL 40–79, NOT\_FOUND < 40 (defined in `LlmService.scoreMatch` prompt, mirrored in `MatchStatus` enum).
-- **CORS** — backend allows `http://localhost:3000` only. Update `SecurityConfig.corsConfigurationSource()` for production origins.
+- **Next.js version** — this Next.js has breaking changes vs. what you likely know. Read `node_modules/next/dist/docs/` before writing Next.js-specific code (`frontend/AGENTS.md` says the same).
+- **Tailwind v4** — `globals.css` uses `@import "tailwindcss"`; the old `@tailwind` directives produce no output.
+- **`@Async` self-call trap** — calling an `@Async` method from inside the same bean bypasses the Spring proxy. `ScrapeService` self-injects `lateinit var self: ScrapeService` via `@Lazy`; services that need async are declared `open` (Kotlin) so they can be proxied.
+- **Arabic content** — tender documents and supplier pages are frequently Arabic. PDF export loads `NotoSansArabic-Regular.ttf` from resources with a Helvetica fallback; prompts ask for bilingual handling.
+- **CORS** — backend allows `http://localhost:3000` only (`SecurityConfig.corsConfigurationSource()`).
+- **Two agent files** — `AGENTS.md` (root, for Codex) is a mirror of this file and differs only in its opening line. Change one, change the other. `frontend/CLAUDE.md` just imports `frontend/AGENTS.md`.
+- **Other docs** — `RUNNING.md` covers run/setup detail; `docs/specta-gap-analysis.md` tracks the build spec backlog (written 2026-07-25, its data-model section predates the V3 schema); designs and plans live in `docs/superpowers/`.

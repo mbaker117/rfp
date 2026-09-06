@@ -2,6 +2,7 @@
 import { Fragment, useState, useCallback, useEffect } from 'react';
 import type { Proposal, ProposalLine, ProposalAlternative, ProductSearchResult } from '@/src/lib/types';
 import { api } from '@/src/lib/api';
+import { isSafeExternalUrl } from '@/src/lib/url';
 
 function AcceptBar({ value }: { value: number | null }) {
   if (value === null) return <span className="text-xs text-slate-400 animate-pulse">computing…</span>;
@@ -219,10 +220,23 @@ export function ProposalDetail({ rfpId, proposal, token, onProposalChange }: Pro
                   <td className="px-4 py-3 text-slate-700">
                     {line.selectedProduct
                       ? (
-                        <span>
-                          {line.selectedProduct.name}
-                          {line.selectedProduct.mpn && (
-                            <span className="text-slate-400 font-mono text-xs ml-1">({line.selectedProduct.mpn})</span>
+                        <span className="flex flex-col gap-0.5">
+                          <span>
+                            {line.selectedProduct.name}
+                            {line.selectedProduct.mpn && (
+                              <span className="text-slate-400 font-mono text-xs ml-1">({line.selectedProduct.mpn})</span>
+                            )}
+                          </span>
+                          {line.selectedProduct.manualLink && isSafeExternalUrl(line.selectedProduct.manualLink) && (
+                            <a
+                              href={line.selectedProduct.manualLink}
+                              target="_blank"
+                              rel="noreferrer"
+                              onClick={e => e.stopPropagation()}
+                              className="text-xs text-indigo-600 hover:underline w-fit"
+                            >
+                              📄 Manual / datasheet
+                            </a>
                           )}
                         </span>
                       )

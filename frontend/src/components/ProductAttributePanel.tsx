@@ -1,20 +1,12 @@
 'use client';
 
 import type { ProductProvenance as ProductProvenanceType } from '@/src/lib/types';
+import { isSafeExternalUrl } from '@/src/lib/url';
 import { ProductProvenance } from './ProductProvenance';
 
 interface Props {
   attributesJson: string;
   provenance?: ProductProvenanceType;
-}
-
-function isSafeExternalUrl(value: string): boolean {
-  try {
-    const url = new URL(value);
-    return url.protocol === 'http:' || url.protocol === 'https:';
-  } catch {
-    return false;
-  }
 }
 
 /** Renders parsed product attributes as a simple key-value grid. */

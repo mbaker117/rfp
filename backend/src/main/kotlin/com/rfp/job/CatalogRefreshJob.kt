@@ -18,7 +18,7 @@ class CatalogRefreshJob(
     private val scrapeService: ScrapeService,
     private val coordinator: CrawlCoordinator,
     private val crawlRunRepo: CrawlRunRepository,
-    @Value("\${rfp.scraper.adaptive-enabled:false}") private val adaptiveEnabled: Boolean = false
+    @Value("\${rfp.scraper.adaptive-enabled:true}") private val adaptiveEnabled: Boolean = true
 ) {
     companion object {
         /** Non-terminal statuses that mean a supplier is already being crawled. */

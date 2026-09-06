@@ -25,7 +25,7 @@ data class CrawlResult(val content: String, val stepLog: String)
 open class ScrapeService(
     private val llmService: LlmService,
     @Value("\${rfp.scraper.throttle-ms:1500}") val throttleMs: Long = 1500,
-    @Value("\${rfp.scraper.adaptive-enabled:false}") val adaptiveEnabled: Boolean = false
+    @Value("\${rfp.scraper.adaptive-enabled:true}") val adaptiveEnabled: Boolean = true
 ) {
     @Autowired @Lazy lateinit var self: ScrapeService
 
@@ -52,10 +52,10 @@ open class ScrapeService(
      * Entry point called by [com.rfp.job.CatalogRefreshJob] and any controller that
      * triggers a supplier scrape.
      *
-     * When [adaptiveEnabled] is **true**: delegates to [CrawlCoordinator.enqueue] and
-     * returns immediately — the durable, resumable crawler takes over.
+     * When [adaptiveEnabled] is **true** (default): delegates to [CrawlCoordinator.enqueue]
+     * and returns immediately — the durable, resumable crawler takes over.
      *
-     * When [adaptiveEnabled] is **false** (default): runs the legacy Playwright-based
+     * When [adaptiveEnabled] is **false**: runs the legacy Playwright-based
      * pipeline inline via [legacyScrape].  The old Playwright code is preserved in
      * [crawlWebsite] and is intentionally NOT removed during the rollout period.
      */
@@ -137,7 +137,7 @@ open class ScrapeService(
             .map { resolveUrl(baseUrl, it) }
             .filter { it.isNotBlank() }
             .distinct()
-            .take(8)
+            .take(30)
         log.append("LLM discovered: ${discoveredUrls.size} product URL(s)\n")
         discoveredUrls.forEach { log.append("  - $it\n") }
         log.append("\n")
@@ -159,7 +159,7 @@ open class ScrapeService(
 
         val allText = (listOf(homepageStripped) + productTexts)
             .joinToString("\n\n--- next page ---\n\n")
-        val capped = allText.take(30000)
+        val capped = allText.take(100_000)
 
         log.append("=== Extraction Input ===\n")
         log.append("Combined text: ${allText.length} chars → capped to ${capped.length} chars\n")

@@ -29,8 +29,8 @@ rfp:
     api-key: ${RFP_LLM_API_KEY:${ANTHROPIC_API_KEY:}}
     model: ${RFP_LLM_MODEL:claude-sonnet-4-6}
     base-url: ${RFP_LLM_BASE_URL:}            # leave blank to use provider default
-    max-tokens: 4096
+    max-tokens: 8192
   scraper:
     throttle-ms: 2000
     refresh-days: 7
-    adaptive-enabled: false   # set true to route via CrawlCoordinator
+    adaptive-enabled: true    # set false to fall back to the legacy inline Playwright scrape

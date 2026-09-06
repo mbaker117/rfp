@@ -141,6 +141,13 @@ class PlaywrightRenderer(
                 return FetchResult.Rejected(FetchError.UNSUPPORTED_CONTENT_TYPE)
             }
 
+            // Scroll to bottom to trigger IntersectionObserver / lazy-loaded spec sections,
+            // then back to top so the captured DOM matches what a user sees on load.
+            runCatching {
+                page.evaluate("() => window.scrollTo(0, document.body.scrollHeight)")
+                page.waitForTimeout(300.0)
+                page.evaluate("() => window.scrollTo(0, 0)")
+            }
             waitForDomStability(page, deadline)
             if (deadline.isExpired()) return FetchResult.Rejected(FetchError.TIMEOUT)
             rejected.get()?.let { return FetchResult.Rejected(it) }

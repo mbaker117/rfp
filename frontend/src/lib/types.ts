@@ -70,6 +70,8 @@ export interface AdminProduct {
   supplierName: string;
   productClass: string | null;
   isStale: boolean;
+  /** Set by the crawl reconciler when a completed crawl stopped finding the product. */
+  crawlerStale: boolean;
   source: string | null;
   attributes: string | null;
 }

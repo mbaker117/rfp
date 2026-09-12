@@ -124,8 +124,10 @@ open class RfpController(
     }
 
     @GetMapping("/{id}/report")
-    fun report(@PathVariable id: Long): ResponseEntity<Map<String, Any?>> {
+    fun report(@PathVariable id: Long, auth: Authentication): ResponseEntity<Map<String, Any?>> {
+        val userId = auth.name.toLongOrNull() ?: return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build()
         val tender = tenderRepo.findById(id).orElseThrow { NoSuchElementException("Tender $id not found") }
+        if (tender.userId != userId) return ResponseEntity.status(HttpStatus.FORBIDDEN).build()
         val lineCount = tenderLineRepo.findByTenderId(id).size
         val results = matchResultRepo.findByLineTenderId(id).map { r ->
             mapOf(
@@ -148,9 +150,13 @@ open class RfpController(
     fun export(
         @PathVariable id: Long,
         @RequestParam format: String,
-        @RequestParam(required = false) proposalId: Long?
-    ): ResponseEntity<ByteArray> =
-        when (format.lowercase()) {
+        @RequestParam(required = false) proposalId: Long?,
+        auth: Authentication
+    ): ResponseEntity<ByteArray> {
+        val userId = auth.name.toLongOrNull() ?: return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build()
+        val tender = tenderRepo.findById(id).orElseThrow { NoSuchElementException("Tender $id not found") }
+        if (tender.userId != userId) return ResponseEntity.status(HttpStatus.FORBIDDEN).build()
+        return when (format.lowercase()) {
             "xlsx" -> ResponseEntity.ok()
                 .header("Content-Disposition", "attachment; filename=report-$id.xlsx")
                 .header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
@@ -161,4 +167,5 @@ open class RfpController(
                 .body(reportService.exportPdf(id, proposalId))
             else -> ResponseEntity.badRequest().build()
         }
+    }
 }

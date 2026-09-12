@@ -47,7 +47,7 @@ class RfpControllerTest {
     private val tender = Tender(id = 1L, userId = 1L, filename = "test.pdf", fileType = "pdf", status = "done")
 
     @Test
-    @WithMockUser
+    @WithMockUser(username = "1")
     fun `GET report returns 200 with rfpId and empty items`() {
         every { tenderRepo.findById(1L) } returns Optional.of(tender)
         every { tenderLineRepo.findByTenderId(1L) } returns emptyList()
@@ -60,7 +60,7 @@ class RfpControllerTest {
     }
 
     @Test
-    @WithMockUser
+    @WithMockUser(username = "1")
     fun `GET report returns 404 when tender not found`() {
         every { tenderRepo.findById(99L) } returns Optional.empty()
 
@@ -84,8 +84,9 @@ class RfpControllerTest {
     }
 
     @Test
-    @WithMockUser
+    @WithMockUser(username = "1")
     fun `GET report export xlsx returns attachment`() {
+        every { tenderRepo.findById(1L) } returns Optional.of(tender)
         val xlsxBytes = byteArrayOf(0x50, 0x4B, 0x03, 0x04)
         every { reportService.exportXlsx(1L, null) } returns xlsxBytes
 
@@ -96,8 +97,9 @@ class RfpControllerTest {
     }
 
     @Test
-    @WithMockUser
+    @WithMockUser(username = "1")
     fun `GET report export pdf returns attachment`() {
+        every { tenderRepo.findById(1L) } returns Optional.of(tender)
         val pdfBytes = byteArrayOf(0x25, 0x50, 0x44, 0x46)
         every { reportService.exportPdf(1L, null) } returns pdfBytes
 
@@ -108,8 +110,9 @@ class RfpControllerTest {
     }
 
     @Test
-    @WithMockUser
+    @WithMockUser(username = "1")
     fun `GET report export with invalid format returns 400`() {
+        every { tenderRepo.findById(1L) } returns Optional.of(tender)
         mvc.perform(get("/rfp/1/report/export").param("format", "docx"))
             .andExpect(status().isBadRequest)
     }
@@ -166,6 +169,24 @@ class RfpControllerTest {
         every { tenderRepo.findById(1L) } returns Optional.of(tender)
 
         mvc.perform(delete("/rfp/1").with(csrf()))
+            .andExpect(status().isForbidden)
+    }
+
+    @Test
+    @WithMockUser(username = "99")
+    fun `GET report returns 403 for non-owner`() {
+        every { tenderRepo.findById(1L) } returns Optional.of(tender)
+
+        mvc.perform(get("/rfp/1/report"))
+            .andExpect(status().isForbidden)
+    }
+
+    @Test
+    @WithMockUser(username = "99")
+    fun `GET report export returns 403 for non-owner`() {
+        every { tenderRepo.findById(1L) } returns Optional.of(tender)
+
+        mvc.perform(get("/rfp/1/report/export").param("format", "pdf"))
             .andExpect(status().isForbidden)
     }
 

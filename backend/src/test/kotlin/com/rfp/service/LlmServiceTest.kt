@@ -125,6 +125,28 @@ class LlmServiceTest {
     }
 
     @Test
+    fun `catalog answer with prose before the json is still parsed`() {
+        val client = RecordingClient("""
+            I need to extract products not already in the "ALREADY EXTRACTED" list. Let me identify the remaining products.
+
+            {"products":[{"className":"AC Motor","name":"Dayton 6K342","mpn":"6K342","attributes":{"item_no":"6K342"}}]}
+        """.trimIndent())
+
+        val res = LlmService(client).parseCatalogChunk("page text", emptyList(), alreadyExtracted = listOf("1K077"))
+
+        assertThat(res.products.map { it.mpn }).containsExactly("6K342")
+        assertThat(res.truncated).isFalse()
+    }
+
+    @Test
+    fun `continuation prompt ends by asking for the json object only`() {
+        val client = RecordingClient("""{"products":[]}""")
+        LlmService(client).parseCatalogChunk("page text", emptyList(), alreadyExtracted = listOf("1K077"))
+
+        assertThat(client.systemPrompt.trimEnd()).endsWith("""Respond with the JSON object only, starting with {"products".""")
+    }
+
+    @Test
     fun `catalog chunk reports truncation from the provider`() {
         val client = TruncatingClient("""{"products":[{"className":"AC Motor","name":"A","mpn":"A1","attributes":{}}]}""", truncated = true)
 

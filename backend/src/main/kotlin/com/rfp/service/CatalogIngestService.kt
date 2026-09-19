@@ -177,7 +177,14 @@ open class CatalogIngestService(
         var calls = 0
         var truncated: Boolean
         do {
-            val result = llmService.parseCatalogChunk(text, knownClasses, seen.toList())
+            val result = try {
+                llmService.parseCatalogChunk(text, knownClasses, seen.toList())
+            } catch (e: LlmException) {
+                // A failed continuation must not throw away what the earlier calls extracted:
+                // keep it and flag the chunk as incomplete. The first call, and fatal errors, still fail the chunk.
+                if (calls == 0 || isFatal(e)) throw e
+                return ChunkOutcome(products, calls + 1, stillTruncated = true)
+            }
             calls++
             val fresh = result.products.filter { seen.add(identity(it)) }
             products += fresh

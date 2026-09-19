@@ -289,6 +289,7 @@ class LlmService(
             Products with these identifiers were already extracted from this same text in an earlier call:
             ${alreadyExtracted.joinToString(", ")}
             Do not repeat them. Extract every remaining product in the text, in document order.
+            Respond with the JSON object only, starting with {"products".
         """.trimIndent()
         val classHint = if (knownClasses.isEmpty()) "No existing classes yet."
         else "Known classes and their attribute keys:\n" +
@@ -366,15 +367,20 @@ class LlmService(
     }
 
     /** Parsed JSON, plus whether it had to be salvaged from a cut-off response. */
-    private fun parseJsonDetailed(raw: String): Pair<com.fasterxml.jackson.databind.JsonNode, Boolean> = try {
-        val cleaned = raw.trim()
+    private fun parseJsonDetailed(raw: String): Pair<com.fasterxml.jackson.databind.JsonNode, Boolean> {
+        // Models occasionally write a sentence before the JSON; start at the JSON object.
+        val trimmed = raw.trim()
+        val start = trimmed.indexOf("{\"products\"").takeIf { it >= 0 } ?: trimmed.indexOf('{').takeIf { it >= 0 } ?: 0
+        val json = trimmed.substring(start)
             .removePrefix("```json").removePrefix("```")
             .trimStart().removeSuffix("```").trimEnd()
-        mapper.readTree(cleaned) to false
-    } catch (_: Exception) {
-        val repaired = repairTruncatedProductsJson(raw)
-            ?: throw LlmException("Failed to parse LLM JSON: ${raw.take(300)}")
-        repaired to true
+        return try {
+            mapper.readTree(json) to false
+        } catch (_: Exception) {
+            val repaired = repairTruncatedProductsJson(json)
+                ?: throw LlmException("Failed to parse LLM JSON: ${raw.take(300)}")
+            repaired to true
+        }
     }
 
     /** "1,234.50" -> 1234.50; anything that is not a plain number ("call for price") -> null. */

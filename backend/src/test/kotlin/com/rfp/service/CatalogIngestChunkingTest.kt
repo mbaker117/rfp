@@ -301,4 +301,34 @@ class CatalogIngestChunkingTest {
 
         assertThat(savedProducts.first { it.mpn == "GD-3" }.attributes).contains("\"range_ppm\":3.0")
     }
+
+    @Test
+    fun `a failed continuation call keeps the products already extracted and flags the chunk`() {
+        every { llmService.parseCatalogChunk(any(), any(), any()) } answers {
+            if (thirdArg<List<String>>().isEmpty()) CatalogBatchResult(rowsIn(firstArg()).take(3), truncated = true)
+            else throw LlmException("Failed to parse LLM JSON: I need to extract products not already in the list.")
+        }
+        existingProducts.add(Product(id = 1L, supplier = supplier, productClass = productClass, name = "Old", source = "upload"))
+
+        service(chunkChars = 500).runIngest(ingest, denseTable, "upload")
+
+        assertThat(savedProducts.mapNotNull { it.mpn }).containsExactly("GD-1", "GD-2", "GD-3")
+        val done = savedIngests.last()
+        assertThat(done.status).isEqualTo("DONE")
+        assertThat(done.stepLog).contains("Chunk 1/1: 3 product(s) (WARNING: some rows may be missing")
+        assertThat(done.stepLog).doesNotContain("Chunk 1/1 failed")
+        assertThat(savedProducts).noneMatch { it.name == "Old" && it.isStale }
+        assertThat(chunkCache).isEmpty()
+    }
+
+    @Test
+    fun `a fatal error on a continuation call still stops the ingest`() {
+        every { llmService.parseCatalogChunk(any(), any(), any()) } answers {
+            if (thirdArg<List<String>>().isEmpty()) CatalogBatchResult(rowsIn(firstArg()).take(3), truncated = true)
+            else throw LlmException("LLM API error 400: Your credit balance is too low to access the Anthropic API.")
+        }
+
+        assertThatThrownBy { service(chunkChars = 500, parallelism = 1).runIngest(ingest, denseTable, "upload") }
+            .hasMessageContaining("credit balance is too low")
+    }
 }

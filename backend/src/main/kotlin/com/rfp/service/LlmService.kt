@@ -271,7 +271,19 @@ class LlmService(
         parseCatalogChunk(rawText, knownClasses).products
 
     /** Like [parseCatalogBatch], but also reports whether the answer was cut off at the output token limit. */
-    fun parseCatalogChunk(rawText: String, knownClasses: List<ClassSchema>): CatalogBatchResult {
+    fun parseCatalogChunk(
+        rawText: String,
+        knownClasses: List<ClassSchema>,
+        alreadyExtracted: List<String> = emptyList()
+    ): CatalogBatchResult {
+        // Continuation of a cut-off answer: same text (so table headings stay in view), skip what we have.
+        val continuation = if (alreadyExtracted.isEmpty()) "" else """
+
+            ALREADY EXTRACTED
+            Products with these identifiers were already extracted from this same text in an earlier call:
+            ${alreadyExtracted.joinToString(", ")}
+            Do not repeat them. Extract every remaining product in the text, in document order.
+        """.trimIndent()
         val classHint = if (knownClasses.isEmpty()) "No existing classes yet."
         else "Known classes and their attribute keys:\n" +
             knownClasses.joinToString("\n") { c ->
@@ -285,6 +297,11 @@ class LlmService(
             WHAT COUNTS AS A PRODUCT
             - Only purchasable items that carry a manufacturer part number, model number, or the supplier's item/SKU number.
               Every row of a product table is its own product.
+            - Every item number printed in the text belongs to a product: do not skip any row, including the last rows
+              of a table or rows of a second table on the same page.
+            - A table may have repeating column groups (e.g. a "370V AC" group and a "440V AC" group, each with its own
+              Item No.): emit one product per item number, combining the shared columns of the row (e.g. MFD) with that
+              group's columns, and record the group heading as a spec (e.g. "voltage_v":"370").
             - Do NOT extract: tables of contents, indexes, page references, selection guides, dimension charts,
               definitions, terminology, "information" or how-to pages, safety notes, or section introductions.
               If the chunk contains no purchasable items, return {"products":[]}.
@@ -306,6 +323,9 @@ class LlmService(
             - ALL technical specifications: every numeric spec with the unit suffixed to the key
               (e.g. "weight_kg":1.2, "voltage_v":220, "frequency_hz":50, "accuracy_pct":0.5), every boolean
               feature (e.g. "waterproof":true), every enumerated property. Include every column of a spec table.
+            - Use one key per spec: never store the same value under two keys (e.g. only "frame":"56H", not also
+              "frame_designation"). The unit belongs in the key; never repeat a unit inside a value
+              ("full_load_amps_a":"14.0/6.9-7.0", not "14.0/6.9-7.0 A"). Keep ranges and multi-voltage values as strings.
             - Specs stated once in a table title, column group heading or section heading (e.g. "Single-Phase, 60 Hz",
               "115/230V", "Explosion-Proof") apply to every row under it: copy them onto each of those products.
 
@@ -317,7 +337,7 @@ class LlmService(
             Respond ONLY with valid JSON — no markdown, no commentary:
             {"products":[{"className":string,"name":string,"mpn":string|null,
               "price":number|null,"currency":string|null,"attributes":{"description":string,"manualLink":string|null,...otherKeys}}]}
-        """.trimIndent()
+        """.trimIndent() + continuation
         val response = llmClient.callDetailed(system, rawText.take(100_000))   // skip cache — site content varies
         val (json, repaired) = parseJsonDetailed(response.text)
         val products = json["products"] ?: throw LlmException("LLM response missing 'products' key")

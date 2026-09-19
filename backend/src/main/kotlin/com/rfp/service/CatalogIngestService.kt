@@ -105,8 +105,8 @@ open class CatalogIngestService(
                     if (outcome.stillTruncated) incompleteChunks++
                     saveProducts(outcome.products, supplier, source, seenIds)
                     log("$label: ${outcome.products.size} product(s)" + when {
-                        outcome.stillTruncated -> " (WARNING: some rows may be missing, the answer still hit the output limit after splitting into ${outcome.parts} parts)"
-                        outcome.parts > 1 -> " (answer hit the output limit; re-extracted in ${outcome.parts} parts)"
+                        outcome.stillTruncated -> " (WARNING: some rows may be missing, the answer was still cut off after ${outcome.calls} calls)"
+                        outcome.calls > 1 -> " (answer hit the output limit; continued in ${outcome.calls} calls)"
                         else -> ""
                     }, seenIds.size)
                 }
@@ -133,24 +133,31 @@ open class CatalogIngestService(
         supplierRepo.save(ingest.supplier.copy(scrapeStatus = "DONE", lastScrapedAt = Instant.now()))
     }
 
-    private data class ChunkOutcome(val products: List<ParsedProduct>, val parts: Int, val stillTruncated: Boolean)
+    private data class ChunkOutcome(val products: List<ParsedProduct>, val calls: Int, val stillTruncated: Boolean)
 
     /**
-     * Extracts [text]; if the answer was cut off at the output token limit, discards it and re-extracts
-     * the text in halves (recursively, up to [MAX_SPLIT_DEPTH] times) so rows past the cut-off are not lost.
+     * Extracts [text]. While the answer is cut off at the output token limit, asks again for the same whole
+     * text (so every table heading stays in view) listing what was already extracted, up to
+     * [MAX_CALLS_PER_CHUNK] calls. Stops early if a call adds nothing new.
      */
-    private fun extractCompletely(text: String, knownClasses: List<ClassSchema>, depth: Int = 0): ChunkOutcome {
-        val result = llmService.parseCatalogChunk(text, knownClasses)
-        if (!result.truncated) return ChunkOutcome(result.products, 1, stillTruncated = false)
-        val halves = if (depth < MAX_SPLIT_DEPTH) CatalogChunker.chunk(text, (text.length + 1) / 2) else emptyList()
-        if (halves.size < 2) return ChunkOutcome(result.products, 1, stillTruncated = true)
-        val parts = halves.map { extractCompletely(it, knownClasses, depth + 1) }
-        return ChunkOutcome(
-            products = parts.flatMap { it.products },
-            parts = parts.sumOf { it.parts },
-            stillTruncated = parts.any { it.stillTruncated }
-        )
+    private fun extractCompletely(text: String, knownClasses: List<ClassSchema>): ChunkOutcome {
+        val products = mutableListOf<ParsedProduct>()
+        val seen = linkedSetOf<String>()
+        var calls = 0
+        var truncated: Boolean
+        do {
+            val result = llmService.parseCatalogChunk(text, knownClasses, seen.toList())
+            calls++
+            val fresh = result.products.filter { seen.add(identity(it)) }
+            products += fresh
+            truncated = result.truncated
+        } while (truncated && fresh.isNotEmpty() && calls < MAX_CALLS_PER_CHUNK)
+        return ChunkOutcome(products, calls, stillTruncated = truncated)
     }
+
+    /** The supplier's item number is the most specific identifier in a catalog, then the part number. */
+    private fun identity(p: ParsedProduct): String =
+        (p.attributes["item_no"]?.toString()?.takeIf { it.isNotBlank() } ?: p.mpn?.takeIf { it.isNotBlank() } ?: p.name).trim()
 
     private fun knownClassSchemas(): List<ClassSchema> =
         productClassRepo.findAll().map { pc ->
@@ -227,7 +234,7 @@ open class CatalogIngestService(
 
     private companion object {
         const val MAX_CONSECUTIVE_FAILURES = 3
-        const val MAX_SPLIT_DEPTH = 3
+        const val MAX_CALLS_PER_CHUNK = 8
         val FATAL_LLM_ERROR = Regex("""LLM API error (400|401|403)\b""")
     }
 }

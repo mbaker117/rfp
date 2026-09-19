@@ -38,7 +38,7 @@ class CatalogIngestServiceTest {
         every { docParser.extractText(any(), "xlsx") } returns "raw text"
         every { productClassRepo.findAll() } returns listOf(productClass)
         every { attrDefRepo.findByProductClassId(10L) } returns emptyList()
-        every { llmService.parseCatalogChunk(any(), any()) } returns CatalogBatchResult(truncated = false, products = listOf(
+        every { llmService.parseCatalogChunk(any(), any(), any()) } returns CatalogBatchResult(truncated = false, products = listOf(
             ParsedProduct("Multimeter", "Fluke 179", "FL179", BigDecimal("320"), "JOD",
                 mapOf("max_voltage" to 1000.0))
         ))
@@ -66,7 +66,7 @@ class CatalogIngestServiceTest {
         every { ingestRepo.save(any()) } answers { firstArg<CatalogIngest>().copy(id = 2L) }
         every { productClassRepo.findAll() } returns listOf(productClass)
         every { attrDefRepo.findByProductClassId(10L) } returns emptyList()
-        every { llmService.parseCatalogChunk(any(), any()) } returns CatalogBatchResult(emptyList(), truncated = false)
+        every { llmService.parseCatalogChunk(any(), any(), any()) } returns CatalogBatchResult(emptyList(), truncated = false)
         every { productRepo.findBySupplierId(1L) } returns emptyList()
         every { supplierRepo.save(any()) } answers { firstArg() }
 

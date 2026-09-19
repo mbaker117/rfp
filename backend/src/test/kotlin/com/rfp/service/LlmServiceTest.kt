@@ -76,6 +76,30 @@ class LlmServiceTest {
     }
 
     @Test
+    fun `catalog prompt splits repeated column groups into one product per item number`() {
+        val client = RecordingClient("""{"products":[]}""")
+        LlmService(client).parseCatalogChunk("page text", emptyList())
+
+        val prompt = client.systemPrompt
+        assertThat(prompt).contains("repeating column groups")
+        assertThat(prompt).contains("one product per item number")
+        assertThat(prompt).contains("Every item number printed in the text belongs to a product")
+        assertThat(prompt).contains("Use one key per spec")
+        assertThat(prompt).contains("never repeat a unit inside a value")
+        assertThat(prompt).doesNotContain("ALREADY EXTRACTED")
+    }
+
+    @Test
+    fun `continuation call lists the identifiers already extracted`() {
+        val client = RecordingClient("""{"products":[]}""")
+        LlmService(client).parseCatalogChunk("page text", emptyList(), alreadyExtracted = listOf("1K065", "6K483"))
+
+        assertThat(client.systemPrompt).contains("ALREADY EXTRACTED").contains("1K065, 6K483")
+        assertThat(client.systemPrompt).contains("Do not repeat them")
+        assertThat(client.userMessage).isEqualTo("page text")
+    }
+
+    @Test
     fun `catalog chunk reports truncation from the provider`() {
         val client = TruncatingClient("""{"products":[{"className":"AC Motor","name":"A","mpn":"A1","attributes":{}}]}""", truncated = true)
 

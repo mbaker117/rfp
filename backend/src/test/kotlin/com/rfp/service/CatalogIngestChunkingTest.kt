@@ -75,11 +75,11 @@ class CatalogIngestChunkingTest {
 
     @Test
     fun `every chunk of the document is sent to the llm and all products are saved`() {
-        every { llmService.parseCatalogChunk(any(), any()) } answers { ok(productFor(firstArg())) }
+        every { llmService.parseCatalogChunk(any(), any(), any()) } answers { ok(productFor(firstArg())) }
 
         service().runIngest(ingest, fourPages, "upload")
 
-        verify(exactly = 4) { llmService.parseCatalogChunk(any(), any()) }
+        verify(exactly = 4) { llmService.parseCatalogChunk(any(), any(), any()) }
         assertThat(savedProducts.map { it.mpn }).containsExactlyInAnyOrder("GD-1", "GD-2", "GD-3", "GD-4")
         val done = savedIngests.last()
         assertThat(done.status).isEqualTo("DONE")
@@ -89,7 +89,7 @@ class CatalogIngestChunkingTest {
 
     @Test
     fun `products are saved in document order even when llm calls run in parallel`() {
-        every { llmService.parseCatalogChunk(any(), any()) } answers {
+        every { llmService.parseCatalogChunk(any(), any(), any()) } answers {
             val chunk = firstArg<String>()
             if (chunk.contains("PAGE-1")) Thread.sleep(150) // first chunk finishes last
             ok(productFor(chunk))
@@ -102,7 +102,7 @@ class CatalogIngestChunkingTest {
 
     @Test
     fun `progress is recorded while the ingest is still running`() {
-        every { llmService.parseCatalogChunk(any(), any()) } answers { ok(productFor(firstArg())) }
+        every { llmService.parseCatalogChunk(any(), any(), any()) } answers { ok(productFor(firstArg())) }
 
         service(parallelism = 1).runIngest(ingest, fourPages, "upload")
 
@@ -112,19 +112,19 @@ class CatalogIngestChunkingTest {
 
     @Test
     fun `chunk cap stops early, says so, and does not mark unseen products stale`() {
-        every { llmService.parseCatalogChunk(any(), any()) } answers { ok(productFor(firstArg())) }
+        every { llmService.parseCatalogChunk(any(), any(), any()) } answers { ok(productFor(firstArg())) }
         existingProducts.add(Product(id = 1L, supplier = supplier, productClass = productClass, name = "Old", source = "upload"))
 
         service(maxChunks = 2).runIngest(ingest, fourPages, "upload")
 
-        verify(exactly = 2) { llmService.parseCatalogChunk(any(), any()) }
+        verify(exactly = 2) { llmService.parseCatalogChunk(any(), any(), any()) }
         assertThat(savedIngests.last().stepLog).contains("capped")
         assertThat(savedProducts).noneMatch { it.name == "Old" && it.isStale }
     }
 
     @Test
     fun `full clean run still marks unseen upload products stale`() {
-        every { llmService.parseCatalogChunk(any(), any()) } answers { ok(productFor(firstArg())) }
+        every { llmService.parseCatalogChunk(any(), any(), any()) } answers { ok(productFor(firstArg())) }
         existingProducts.add(Product(id = 1L, supplier = supplier, productClass = productClass, name = "Old", source = "upload"))
 
         service().runIngest(ingest, fourPages, "upload")
@@ -134,7 +134,7 @@ class CatalogIngestChunkingTest {
 
     @Test
     fun `a failing chunk is logged and skipped without marking products stale`() {
-        every { llmService.parseCatalogChunk(any(), any()) } answers {
+        every { llmService.parseCatalogChunk(any(), any(), any()) } answers {
             val chunk = firstArg<String>()
             if (chunk.contains("PAGE-2")) throw LlmException("LLM API error 529: Overloaded")
             ok(productFor(chunk))
@@ -152,59 +152,98 @@ class CatalogIngestChunkingTest {
 
     @Test
     fun `a credit or auth error stops the ingest immediately`() {
-        every { llmService.parseCatalogChunk(any(), any()) } throws
+        every { llmService.parseCatalogChunk(any(), any(), any()) } throws
             LlmException("LLM API error 400: Your credit balance is too low to access the Anthropic API.")
 
         assertThatThrownBy { service(parallelism = 1).runIngest(ingest, fourPages, "upload") }
             .isInstanceOf(LlmException::class.java)
             .hasMessageContaining("credit balance is too low")
 
-        verify(exactly = 1) { llmService.parseCatalogChunk(any(), any()) }
+        verify(exactly = 1) { llmService.parseCatalogChunk(any(), any(), any()) }
     }
 
     @Test
     fun `three consecutive chunk failures stop the ingest`() {
-        every { llmService.parseCatalogChunk(any(), any()) } throws LlmException("LLM API error 529: Overloaded")
+        every { llmService.parseCatalogChunk(any(), any(), any()) } throws LlmException("LLM API error 529: Overloaded")
 
         assertThatThrownBy { service(parallelism = 1).runIngest(ingest, fourPages, "upload") }
             .isInstanceOf(LlmException::class.java)
             .hasMessageContaining("3 consecutive chunks failed")
 
-        verify(exactly = 3) { llmService.parseCatalogChunk(any(), any()) }
+        verify(exactly = 3) { llmService.parseCatalogChunk(any(), any(), any()) }
     }
 
     /** Eight 40-char table rows on one page, fitting in a single 500-char chunk. */
     private val denseTable = (1..8).joinToString("\n") { "ROW-$it ".padEnd(40, '.') }
 
-    @Test
-    fun `a chunk whose answer hit the output limit is split and every row is re-extracted`() {
-        // The model can only fit 4 rows per answer: bigger chunks come back cut off after 3.
-        every { llmService.parseCatalogChunk(any(), any()) } answers {
-            val rows = rowsIn(firstArg())
-            if (rows.size > 4) CatalogBatchResult(rows.take(3), truncated = true) else ok(rows)
+    /** A model that fits [perAnswer] rows per answer and skips rows it is told were already extracted. */
+    private fun limitedModel(perAnswer: Int) {
+        every { llmService.parseCatalogChunk(any(), any(), any()) } answers {
+            val done = thirdArg<List<String>>().toSet()
+            val remaining = rowsIn(firstArg()).filter { it.mpn !in done }
+            CatalogBatchResult(remaining.take(perAnswer), truncated = remaining.size > perAnswer)
         }
+    }
+
+    @Test
+    fun `a cut-off answer is continued on the whole chunk until every row is extracted`() {
+        limitedModel(perAnswer = 3)
 
         service(chunkChars = 500).runIngest(ingest, denseTable, "upload")
 
         assertThat(savedProducts.map { it.mpn }).containsExactly("GD-1", "GD-2", "GD-3", "GD-4", "GD-5", "GD-6", "GD-7", "GD-8")
-        verify(exactly = 3) { llmService.parseCatalogChunk(any(), any()) }
+        // every call sees the whole chunk (so table headings stay in view), with the ids already extracted
+        verify(exactly = 3) { llmService.parseCatalogChunk(denseTable, any(), any()) }
+        verify { llmService.parseCatalogChunk(denseTable, any(), listOf("GD-1", "GD-2", "GD-3")) }
+        verify { llmService.parseCatalogChunk(denseTable, any(), listOf("GD-1", "GD-2", "GD-3", "GD-4", "GD-5", "GD-6")) }
         val done = savedIngests.last()
-        assertThat(done.stepLog).contains("Chunk 1/1: 8 product(s) (answer hit the output limit; re-extracted in 2 parts)")
+        assertThat(done.stepLog).contains("Chunk 1/1: 8 product(s) (answer hit the output limit; continued in 3 calls)")
         assertThat(done.stepLog).doesNotContain("WARNING")
         assertThat(done.status).isEqualTo("DONE")
     }
 
     @Test
-    fun `a chunk that still hits the limit after splitting is flagged and does not stale products`() {
-        every { llmService.parseCatalogChunk(any(), any()) } answers {
-            CatalogBatchResult(rowsIn(firstArg()).take(1), truncated = true)
-        }
+    fun `a chunk still cut off after the maximum number of calls is flagged and does not stale products`() {
+        limitedModel(perAnswer = 1)
+        val sixteenRows = (1..16).joinToString("\n") { "ROW-$it ".padEnd(20, '.') }
         existingProducts.add(Product(id = 1L, supplier = supplier, productClass = productClass, name = "Old", source = "upload"))
+
+        service(chunkChars = 500).runIngest(ingest, sixteenRows, "upload")
+
+        verify(exactly = 8) { llmService.parseCatalogChunk(any(), any(), any()) }
+        assertThat(savedProducts.mapNotNull { it.mpn }).hasSize(8)
+        assertThat(savedIngests.last().stepLog).contains("WARNING: some rows may be missing")
+        assertThat(savedProducts).noneMatch { it.name == "Old" && it.isStale }
+    }
+
+    @Test
+    fun `continuation stops when a call returns nothing new`() {
+        every { llmService.parseCatalogChunk(any(), any(), any()) } answers {
+            CatalogBatchResult(rowsIn(firstArg()).take(2), truncated = true) // ignores the already-extracted list
+        }
 
         service(chunkChars = 500).runIngest(ingest, denseTable, "upload")
 
-        val done = savedIngests.last()
-        assertThat(done.stepLog).contains("WARNING: some rows may be missing")
-        assertThat(savedProducts).noneMatch { it.name == "Old" && it.isStale }
+        verify(exactly = 2) { llmService.parseCatalogChunk(any(), any(), any()) }
+        assertThat(savedProducts.map { it.mpn }).containsExactly("GD-1", "GD-2")
+        assertThat(savedIngests.last().stepLog).contains("WARNING: some rows may be missing")
+    }
+
+    @Test
+    fun `continuation identifies products by item number before part number`() {
+        val calls = mutableListOf<List<String>>()
+        every { llmService.parseCatalogChunk(any(), any(), any()) } answers {
+            calls.add(thirdArg())
+            if (calls.size == 1) CatalogBatchResult(listOf(
+                ParsedProduct("AC Motor", "Motor A", "5KC46", null, "JOD", mapOf("item_no" to "44D126")),
+                ParsedProduct("AC Motor", "Motor B", null, null, "JOD", emptyMap())
+            ), truncated = true)
+            else ok(emptyList())
+        }
+        every { productClassRepo.findByNameIgnoreCase("AC Motor") } returns productClass
+
+        service(chunkChars = 500).runIngest(ingest, denseTable, "upload")
+
+        assertThat(calls[1]).containsExactly("44D126", "Motor B")
     }
 }

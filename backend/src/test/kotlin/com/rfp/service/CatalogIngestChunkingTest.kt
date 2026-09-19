@@ -331,4 +331,39 @@ class CatalogIngestChunkingTest {
         assertThatThrownBy { service(chunkChars = 500, parallelism = 1).runIngest(ingest, denseTable, "upload") }
             .hasMessageContaining("credit balance is too low")
     }
+
+    @Test
+    fun `attribute definitions are synced for the classes an import touched`() {
+        every { llmService.parseCatalogChunk(any(), any(), any()) } answers { ok(productFor(firstArg())) }
+        val schema = mockk<AttributeSchemaService>()
+        every { schema.syncClasses(any()) } returns AttributeSchemaService.SyncResult(added = 2, fixed = 1)
+        val svc = CatalogIngestService(
+            supplierRepo, productClassRepo, attrDefRepo, productRepo,
+            productPriceRepo, priceHistoryRepo, ingestRepo, llmService, unitService, docParser,
+            chunkChars = 50, schemaService = schema
+        )
+
+        svc.runIngest(ingest, fourPages, "upload")
+
+        verify(exactly = 1) { schema.syncClasses(setOf(10L)) }
+        assertThat(savedIngests.last().stepLog).contains("Attribute definitions: 2 added, 1 corrected, 0 identifier(s) removed")
+        assertThat(savedIngests.last().status).isEqualTo("DONE")
+    }
+
+    @Test
+    fun `a failing attribute sync does not fail the import`() {
+        every { llmService.parseCatalogChunk(any(), any(), any()) } answers { ok(productFor(firstArg())) }
+        val schema = mockk<AttributeSchemaService>()
+        every { schema.syncClasses(any()) } throws RuntimeException("db hiccup")
+        val svc = CatalogIngestService(
+            supplierRepo, productClassRepo, attrDefRepo, productRepo,
+            productPriceRepo, priceHistoryRepo, ingestRepo, llmService, unitService, docParser,
+            chunkChars = 50, schemaService = schema
+        )
+
+        svc.runIngest(ingest, fourPages, "upload")
+
+        assertThat(savedIngests.last().status).isEqualTo("DONE")
+        assertThat(savedIngests.last().stepLog).contains("Attribute definitions were not updated: db hiccup")
+    }
 }

@@ -33,6 +33,7 @@ open class CatalogIngestService(
     @Value("\${rfp.catalog.max-chunks:150}") private val maxChunks: Int = 150,
     @Value("\${rfp.catalog.parallelism:4}") private val parallelism: Int = 4,
     private val chunkCacheRepo: CatalogChunkCacheRepository? = null,
+    private val schemaService: AttributeSchemaService? = null,
     @Value("\${rfp.llm.model:}") private val model: String = ""
 ) {
     private val mapper = ObjectMapper().apply { findAndRegisterModules() }
@@ -78,6 +79,7 @@ open class CatalogIngestService(
             if (capped) "; processing the first ${toProcess.size} only (capped by rfp.catalog.max-chunks, the rest of the document is skipped)" else "")
 
         val seenIds = mutableSetOf<Long>()
+        val touchedClassIds = mutableSetOf<Long>()
         var failedChunks = 0
         var incompleteChunks = 0
         var consecutiveFailures = 0
@@ -108,7 +110,7 @@ open class CatalogIngestService(
                     }
                     consecutiveFailures = 0
                     if (outcome.stillTruncated) incompleteChunks++
-                    saveProducts(outcome.products, supplier, source, seenIds)
+                    saveProducts(outcome.products, supplier, source, seenIds, touchedClassIds)
                     log("$label: ${outcome.products.size} product(s)" + when {
                         outcome.fromCache -> " (from cache)"
                         outcome.stillTruncated -> " (WARNING: some rows may be missing, the answer was still cut off after ${outcome.calls} calls)"
@@ -131,6 +133,17 @@ open class CatalogIngestService(
                 .forEach { productRepo.save(it.copy(isStale = true)) }
         } else {
             log("Existing products were not marked stale because the document was only partially processed")
+        }
+
+        schemaService?.let { schema ->
+            // Never fail an import over its class schemas; the admin endpoint can re-run the sync.
+            try {
+                val r = schema.syncClasses(touchedClassIds)
+                if (r.added + r.fixed + r.removed > 0)
+                    log("Attribute definitions: ${r.added} added, ${r.fixed} corrected, ${r.removed} identifier(s) removed")
+            } catch (e: Exception) {
+                log("Attribute definitions were not updated: ${e.message}")
+            }
         }
 
         log("Finished: ${seenIds.size} product(s) from ${toProcess.size - failedChunks}/${toProcess.size} chunk(s)", seenIds.size)
@@ -229,11 +242,15 @@ open class CatalogIngestService(
         product.attributes?.let { runCatching { mapper.readTree(it).path("item_no").asText(null) }.getOrNull() }
             ?.takeIf { it.isNotBlank() }
 
-    private fun saveProducts(parsed: List<ParsedProduct>, supplier: Supplier, source: String, seenIds: MutableSet<Long>) {
+    private fun saveProducts(
+        parsed: List<ParsedProduct>, supplier: Supplier, source: String,
+        seenIds: MutableSet<Long>, touchedClassIds: MutableSet<Long> = mutableSetOf()
+    ) {
         parsed.forEach { p ->
             val productClass = resolveOrCreateClass(p.className, parsed
                 .filter { it.className == p.className }
                 .take(5).map { it.name + " " + it.attributes.toString() })
+            touchedClassIds += productClass.id
 
             val defs = attrDefRepo.findByProductClassId(productClass.id)
             val normalizedAttrs = unitService.normalizeAttributes(p.attributes, defs)

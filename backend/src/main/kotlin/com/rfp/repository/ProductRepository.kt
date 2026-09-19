@@ -19,6 +19,7 @@ interface ProductRepository : JpaRepository<Product, Long> {
     fun findBySupplierIdAndMpnIgnoreCase(supplierId: Long, mpn: String): Product?
     fun findBySupplierIdAndNameIgnoreCase(supplierId: Long, name: String): Product?
     fun findBySupplierId(supplierId: Long): List<Product>
+    fun findByProductClassId(classId: Long): List<Product>
 
     // Catalog upload matching: lists, because generic names and shared part numbers can legitimately repeat.
     fun findAllBySupplierIdAndMpnIgnoreCase(supplierId: Long, mpn: String): List<Product>

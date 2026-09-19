@@ -32,7 +32,7 @@ class UnitNormalizationService(private val jdbc: JdbcTemplate) {
             val unitKey = "${def.name}_unit"
             val fromUnit = attrs[unitKey]?.toString() ?: def.canonicalUnit!!
             val canonical = def.canonicalUnit!!
-            val normalized = normalize(rawValue.toString().toDoubleOrNull() ?: return@forEach, fromUnit, canonical)
+            val normalized = normalize(SpecNumbers.parse(rawValue) ?: return@forEach, fromUnit, canonical)
             result[def.name] = normalized
             result.remove(unitKey)
         }

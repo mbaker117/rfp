@@ -8,6 +8,7 @@ import com.rfp.repository.AppUserRepository
 import com.rfp.repository.ProductPriceRepository
 import com.rfp.repository.ProductRepository
 import com.rfp.repository.TenderRepository
+import com.rfp.service.AttributeSchemaService
 import io.mockk.every
 import io.mockk.mockk
 import org.assertj.core.api.Assertions.assertThat
@@ -25,7 +26,8 @@ class AdminControllerTest {
         mockk<AppUserRepository>(),
         productRepo,
         mockk<TenderRepository>(),
-        priceRepo
+        priceRepo,
+        mockk<AttributeSchemaService>()
     )
 
     @Test

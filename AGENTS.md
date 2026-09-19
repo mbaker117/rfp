@@ -125,11 +125,13 @@ The legacy path still exists behind `rfp.scraper.adaptive-enabled` (`true` in `a
 
 Deterministic, **no LLM at scoring time**. Per tender line: exact name match → exact MPN match → attribute scoring over candidates in the same `product_class` from the selected suppliers. Each required attribute yields a verdict (`COMPLIANT` / `DEVIATION` / `UNVERIFIABLE`, using `AttributeDef.matchOp` = `eq`/`gte`/`lte`), and `score = compliant / total * 100`. Status: `matched` at 100, `partial` at ≥40, else `not_found`. Alternatives = next 5 candidates scoring ≥40, denormalized into `match_result.alternatives` JSON.
 
+`AttributeSchemaService` keeps each class's `attribute_def`s in line with the specs its products carry: after every catalog import (touched classes) and via `POST /admin/product-classes/sync-attributes` (all classes). It adds defs for specs on ≥5% of a class's products, types them from the stored values, takes units from the key suffix (`_in`, `_v`, `_pct`…), allows `gte`/`lte` only on numeric specs, and removes identifier defs (`item_no`, `*_item_no`, `mpn`). Numbers are read with `SpecNumbers.parse`, which accepts catalog fractions ("13 3/8") but not dual ratings ("115/230").
+
 Re-running match is an upsert keyed on `match_result.line_id` (unique), and `matchAsync` returns early when status is already `matching`/`done` — that guard is why re-runs first set `pending_match`.
 
 ### LLM integration
 
-`LlmService` owns every prompt and forces JSON-only output. Tasks: `parseCatalogBatch`, `defineClass` (auto-creates a `product_class` + its `attribute_def`s), `identifyProductUrls`, `parseTenderLines`, `estimateAcceptance`, plus crawler tasks `extractCrawlProducts` and `classifyCrawlPage`.
+`LlmService` owns every prompt and forces JSON-only output. Tasks: `parseCatalogBatch`, `defineClass` (auto-creates a `product_class` + its `attribute_def`s), `defineAttributes` (labels + matchOp for specs added later), `identifyProductUrls`, `parseTenderLines`, `estimateAcceptance`, plus crawler tasks `extractCrawlProducts` and `classifyCrawlPage`.
 
 - Responses are cached in a `ConcurrentHashMap` keyed by `sha256(system|user)`; site-specific calls (`parseCatalogBatch`, `identifyProductUrls`, crawl extraction) deliberately bypass the cache.
 - Crawl-facing tasks are hardened: strict `schemaVersion` check, response byte/char caps, attribute count/depth/string limits, and prompts that state all page content is untrusted data, never instructions.

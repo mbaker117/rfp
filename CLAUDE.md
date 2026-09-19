@@ -119,7 +119,7 @@ Invariants enforced in code (do not relax them, and never let LLM output overrid
 - Reconciliation is idempotent; identity keys (`ProductIdentityService`, `mpn:` or `fallback:` sha256) are scoped per supplier.
 - SSRF protection lives in `CrawlPolicy` + `ValidatedHttpTransport`: http/https only, host must be within the supplier's registrable domain or an explicit allow-list, DNS results must be public addresses, and each hop is re-validated.
 
-The legacy path still exists behind `rfp.scraper.adaptive-enabled` (currently `true` in `application.yml`; the `ScrapeService` default is `false`). Do not delete the legacy Playwright code during rollout.
+The legacy path still exists behind `rfp.scraper.adaptive-enabled` (`true` in `application.yml` and as the `@Value` default in `ScrapeService`/`CatalogRefreshJob`; set it to `false` to fall back to the inline Playwright scrape). Do not delete the legacy Playwright code during rollout.
 
 ### Matching engine
 
@@ -158,4 +158,4 @@ Flyway owns the schema (`ddl-auto: validate`) — every column change needs a ne
 - **Arabic content** — tender documents and supplier pages are frequently Arabic. PDF export loads `NotoSansArabic-Regular.ttf` from resources with a Helvetica fallback; prompts ask for bilingual handling.
 - **CORS** — backend allows `http://localhost:3000` only (`SecurityConfig.corsConfigurationSource()`).
 - **Two agent files** — `AGENTS.md` (root, for Codex) is a mirror of this file and differs only in its opening line. Change one, change the other. `frontend/CLAUDE.md` just imports `frontend/AGENTS.md`.
-- **Other docs** — `RUNNING.md` covers run/setup detail; `docs/specta-gap-analysis.md` tracks the build spec backlog (written 2026-07-25, its data-model section predates the V3 schema); designs and plans live in `docs/superpowers/`.
+- **Other docs** — `RUNNING.md` covers run/setup detail; `Specta Technical Core Build Spec v1.md` (repo root) is the original product spec; `docs/specta-gap-analysis.md` tracks the build spec backlog (written 2026-07-25, its data-model section predates the V3 schema); designs and plans live in `docs/superpowers/`.

@@ -11,13 +11,11 @@ class LlmServiceTest {
 
     @Test
     fun `parseCatalogBatch returns parsed products`() {
-        val llmClient = mockk<LlmClient>()
-        val service = LlmService(llmClient)
-        every { llmClient.call(any(), any()) } returns """
+        val service = LlmService(RecordingClient("""
             {"products":[{"className":"Multimeter","name":"Fluke 179","mpn":"FL179",
               "price":320.0,"currency":"JOD","attributes":{"description":"Portable true-RMS multimeter.",
               "manualLink":"https://example.com/manual.pdf","max_voltage":1000,"has_trms":true}}]}
-        """.trimIndent()
+        """.trimIndent()))
 
         val result = service.parseCatalogBatch("raw text", emptyList())
         assertThat(result).hasSize(1)
@@ -75,6 +73,37 @@ class LlmServiceTest {
         assertThat(result[1].price).isNull()
         assertThat(result[1].currency).isEqualTo("JOD")
         assertThat(result[2].price).isNull()
+    }
+
+    @Test
+    fun `catalog chunk reports truncation from the provider`() {
+        val client = TruncatingClient("""{"products":[{"className":"AC Motor","name":"A","mpn":"A1","attributes":{}}]}""", truncated = true)
+
+        val res = LlmService(client).parseCatalogChunk("page text", emptyList())
+
+        assertThat(res.truncated).isTrue()
+        assertThat(res.products.map { it.name }).containsExactly("A")
+    }
+
+    @Test
+    fun `catalog chunk whose json had to be repaired counts as truncated`() {
+        val cutOff = """{"products":[{"className":"AC Motor","name":"A","mpn":"A1","attributes":{}},{"className":"AC Mo"""
+        val res = LlmService(TruncatingClient(cutOff, truncated = false)).parseCatalogChunk("page text", emptyList())
+
+        assertThat(res.truncated).isTrue()
+        assertThat(res.products.map { it.name }).containsExactly("A")
+    }
+
+    @Test
+    fun `complete catalog chunk is not truncated`() {
+        val res = LlmService(TruncatingClient("""{"products":[]}""", truncated = false)).parseCatalogChunk("page text", emptyList())
+
+        assertThat(res.truncated).isFalse()
+    }
+
+    private class TruncatingClient(private val text: String, private val truncated: Boolean) : LlmClient {
+        override fun call(systemPrompt: String, userMessage: String) = text
+        override fun callDetailed(systemPrompt: String, userMessage: String) = LlmResponse(text, truncated)
     }
 
     @Test

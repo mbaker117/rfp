@@ -74,16 +74,17 @@ open class CatalogIngestService(
 
         val seenIds = mutableSetOf<Long>()
         var failedChunks = 0
+        var incompleteChunks = 0
         var consecutiveFailures = 0
         val workers = parallelism.coerceAtLeast(1)
         val pool = Executors.newFixedThreadPool(workers)
         try {
             toProcess.withIndex().chunked(workers).forEach { wave ->
                 val knownClasses = knownClassSchemas()
-                val futures = wave.map { (i, text) -> i to pool.submit(Callable { llmService.parseCatalogBatch(text, knownClasses) }) }
+                val futures = wave.map { (i, text) -> i to pool.submit(Callable { extractCompletely(text, knownClasses) }) }
                 for ((i, future) in futures) {
                     val label = "Chunk ${i + 1}/${toProcess.size}"
-                    val parsed = try {
+                    val outcome = try {
                         future.get()
                     } catch (e: ExecutionException) {
                         val cause = e.cause ?: e
@@ -101,8 +102,13 @@ open class CatalogIngestService(
                         continue
                     }
                     consecutiveFailures = 0
-                    saveProducts(parsed, supplier, source, seenIds)
-                    log("$label: ${parsed.size} product(s)", seenIds.size)
+                    if (outcome.stillTruncated) incompleteChunks++
+                    saveProducts(outcome.products, supplier, source, seenIds)
+                    log("$label: ${outcome.products.size} product(s)" + when {
+                        outcome.stillTruncated -> " (WARNING: some rows may be missing, the answer still hit the output limit after splitting into ${outcome.parts} parts)"
+                        outcome.parts > 1 -> " (answer hit the output limit; re-extracted in ${outcome.parts} parts)"
+                        else -> ""
+                    }, seenIds.size)
                 }
             }
         } finally {
@@ -110,7 +116,7 @@ open class CatalogIngestService(
         }
         if (failedChunks == toProcess.size) throw LlmException("All ${toProcess.size} chunk(s) failed")
 
-        if (!capped && failedChunks == 0) {
+        if (!capped && failedChunks == 0 && incompleteChunks == 0) {
             // Mark ingest-sourced products not seen in this run as stale.
             // Exclude crawler-discovered products (canonicalSourceUrl != null) to prevent
             // a PDF upload from staling products that were found by the adaptive crawler.
@@ -125,6 +131,25 @@ open class CatalogIngestService(
         ingestRepo.save(current.copy(status = "DONE", itemsFound = seenIds.size, finishedAt = Instant.now()))
         // Mark the supplier as freshly scraped so CatalogRefreshJob picks up the right cutoff
         supplierRepo.save(ingest.supplier.copy(scrapeStatus = "DONE", lastScrapedAt = Instant.now()))
+    }
+
+    private data class ChunkOutcome(val products: List<ParsedProduct>, val parts: Int, val stillTruncated: Boolean)
+
+    /**
+     * Extracts [text]; if the answer was cut off at the output token limit, discards it and re-extracts
+     * the text in halves (recursively, up to [MAX_SPLIT_DEPTH] times) so rows past the cut-off are not lost.
+     */
+    private fun extractCompletely(text: String, knownClasses: List<ClassSchema>, depth: Int = 0): ChunkOutcome {
+        val result = llmService.parseCatalogChunk(text, knownClasses)
+        if (!result.truncated) return ChunkOutcome(result.products, 1, stillTruncated = false)
+        val halves = if (depth < MAX_SPLIT_DEPTH) CatalogChunker.chunk(text, (text.length + 1) / 2) else emptyList()
+        if (halves.size < 2) return ChunkOutcome(result.products, 1, stillTruncated = true)
+        val parts = halves.map { extractCompletely(it, knownClasses, depth + 1) }
+        return ChunkOutcome(
+            products = parts.flatMap { it.products },
+            parts = parts.sumOf { it.parts },
+            stillTruncated = parts.any { it.stillTruncated }
+        )
     }
 
     private fun knownClassSchemas(): List<ClassSchema> =
@@ -202,6 +227,7 @@ open class CatalogIngestService(
 
     private companion object {
         const val MAX_CONSECUTIVE_FAILURES = 3
+        const val MAX_SPLIT_DEPTH = 3
         val FATAL_LLM_ERROR = Regex("""LLM API error (400|401|403)\b""")
     }
 }

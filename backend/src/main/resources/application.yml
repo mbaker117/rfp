@@ -29,7 +29,7 @@ rfp:
     api-key: ${RFP_LLM_API_KEY:${ANTHROPIC_API_KEY:}}
     model: ${RFP_LLM_MODEL:claude-sonnet-4-6}
     base-url: ${RFP_LLM_BASE_URL:}            # leave blank to use provider default
-    max-tokens: 8192
+    max-tokens: 16000     # output cap per LLM call; catalog chunks whose answer hits it are split and re-extracted
   catalog:
     chunk-chars: 12000   # text per LLM extraction call; small enough that one response holds every product in it
     max-chunks: 150      # cost cap per upload (~450-600 PDF pages); the rest of a larger document is skipped and logged

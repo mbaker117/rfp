@@ -13,6 +13,9 @@ import java.security.MessageDigest
 
 class LlmException(message: String) : RuntimeException(message)
 
+/** [truncated]: the answer hit the output token limit, so rows after the last complete product are missing. */
+data class CatalogBatchResult(val products: List<ParsedProduct>, val truncated: Boolean)
+
 data class AcceptanceEstimate(val probability: Int, val reasoning: String)
 
 @Service
@@ -49,16 +52,8 @@ class LlmService(
         return cache.getOrPut(key) { llmClient.call(systemPrompt, userMessage) }
     }
 
-    private fun parseJson(raw: String) = try {
-        val cleaned = raw.trim()
-            .removePrefix("```json").removePrefix("```")
-            .trimStart().removeSuffix("```").trimEnd()
-        mapper.readTree(cleaned)
-    } catch (_: Exception) {
-        // Try to salvage truncated JSON: find all complete top-level objects in a "products" array
-        repairTruncatedProductsJson(raw)
-            ?: throw LlmException("Failed to parse LLM JSON: ${raw.take(300)}")
-    }
+    // Falls back to salvaging truncated JSON: all complete top-level objects in a "products" array
+    private fun parseJson(raw: String) = parseJsonDetailed(raw).first
 
     fun extractCrawlProducts(
         candidateText: String,
@@ -272,7 +267,11 @@ class LlmService(
     }
 
     // Task 1: parse raw catalog text into structured products
-    fun parseCatalogBatch(rawText: String, knownClasses: List<ClassSchema>): List<ParsedProduct> {
+    fun parseCatalogBatch(rawText: String, knownClasses: List<ClassSchema>): List<ParsedProduct> =
+        parseCatalogChunk(rawText, knownClasses).products
+
+    /** Like [parseCatalogBatch], but also reports whether the answer was cut off at the output token limit. */
+    fun parseCatalogChunk(rawText: String, knownClasses: List<ClassSchema>): CatalogBatchResult {
         val classHint = if (knownClasses.isEmpty()) "No existing classes yet."
         else "Known classes and their attribute keys:\n" +
             knownClasses.joinToString("\n") { c ->
@@ -319,18 +318,36 @@ class LlmService(
             {"products":[{"className":string,"name":string,"mpn":string|null,
               "price":number|null,"currency":string|null,"attributes":{"description":string,"manualLink":string|null,...otherKeys}}]}
         """.trimIndent()
-        val json = parseJson(llmClient.call(system, rawText.take(100_000)))   // skip cache — site content varies
+        val response = llmClient.callDetailed(system, rawText.take(100_000))   // skip cache — site content varies
+        val (json, repaired) = parseJsonDetailed(response.text)
         val products = json["products"] ?: throw LlmException("LLM response missing 'products' key")
-        return products.map { p ->
-            ParsedProduct(
-                className = p["className"].asText(),
-                name = p["name"].asText(),
-                mpn = p["mpn"]?.takeIf { !it.isNull }?.asText(),
-                price = p["price"]?.takeIf { !it.isNull }?.let { catalogPrice(it.asText()) },
-                currency = p["currency"]?.takeIf { !it.isNull }?.asText()?.takeIf { it.isNotBlank() } ?: "JOD",
-                attributes = mapper.readValue(p["attributes"].toString())
-            )
-        }
+        return CatalogBatchResult(
+            products = products.map { p ->
+                ParsedProduct(
+                    className = p["className"].asText(),
+                    name = p["name"].asText(),
+                    mpn = p["mpn"]?.takeIf { !it.isNull }?.asText(),
+                    price = p["price"]?.takeIf { !it.isNull }?.let { catalogPrice(it.asText()) },
+                    currency = p["currency"]?.takeIf { !it.isNull }?.asText()?.takeIf { it.isNotBlank() } ?: "JOD",
+                    attributes = mapper.readValue(p["attributes"].toString())
+                )
+            },
+            // A cut-off answer that was salvaged by repairTruncatedProductsJson is truncated too,
+            // even if the provider did not report it.
+            truncated = response.truncated || repaired
+        )
+    }
+
+    /** Parsed JSON, plus whether it had to be salvaged from a cut-off response. */
+    private fun parseJsonDetailed(raw: String): Pair<com.fasterxml.jackson.databind.JsonNode, Boolean> = try {
+        val cleaned = raw.trim()
+            .removePrefix("```json").removePrefix("```")
+            .trimStart().removeSuffix("```").trimEnd()
+        mapper.readTree(cleaned) to false
+    } catch (_: Exception) {
+        val repaired = repairTruncatedProductsJson(raw)
+            ?: throw LlmException("Failed to parse LLM JSON: ${raw.take(300)}")
+        repaired to true
     }
 
     /** "1,234.50" -> 1234.50; anything that is not a plain number ("call for price") -> null. */

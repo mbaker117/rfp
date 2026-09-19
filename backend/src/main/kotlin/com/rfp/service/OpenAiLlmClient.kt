@@ -15,17 +15,22 @@ import org.springframework.stereotype.Service
 class OpenAiLlmClient(
     @Value("\${rfp.llm.api-key}") val apiKey: String,
     @Value("\${rfp.llm.model}") val model: String,
-    @Value("\${rfp.llm.base-url:https://api.openai.com/v1/}") val baseUrl: String = "https://api.openai.com/v1/"
+    @Value("\${rfp.llm.base-url:https://api.openai.com/v1/}") val baseUrl: String = "https://api.openai.com/v1/",
+    @Value("\${rfp.llm.max-tokens:16000}") val maxTokens: Int = 16000
 ) : LlmClient {
 
+    // Non-streaming: nothing arrives until the whole answer is generated, so the read timeout
+    // must cover a full max-tokens response.
     private val client = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(120, TimeUnit.SECONDS)
+        .readTimeout(600, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
         .build()
     private val mapper = ObjectMapper()
 
-    override fun call(systemPrompt: String, userMessage: String): String {
+    override fun call(systemPrompt: String, userMessage: String): String = callDetailed(systemPrompt, userMessage).text
+
+    override fun callDetailed(systemPrompt: String, userMessage: String): LlmResponse {
         val body = mapper.writeValueAsString(mapOf(
             "model" to model,
             "temperature" to 0,
@@ -33,7 +38,7 @@ class OpenAiLlmClient(
                 mapOf("role" to "system", "content" to systemPrompt),
                 mapOf("role" to "user", "content" to userMessage)
             ),
-            "max_tokens" to 8192
+            "max_tokens" to maxTokens
         ))
         val request = Request.Builder()
             .url("${baseUrl}chat/completions")
@@ -42,9 +47,10 @@ class OpenAiLlmClient(
             .build()
         return client.newCall(request).execute().use { response ->
             if (!response.isSuccessful) throw llmHttpError(response.code, response.body?.string(), mapper)
-            val json = mapper.readTree(response.body!!.string())
-            json["choices"]?.get(0)?.get("message")?.get("content")?.asText()
+            val choice = mapper.readTree(response.body!!.string())["choices"]?.get(0)
+            val text = choice?.get("message")?.get("content")?.asText()
                 ?: throw LlmException("Empty LLM response")
+            LlmResponse(text, truncated = choice.get("finish_reason")?.asText() == "length")
         }
     }
 }

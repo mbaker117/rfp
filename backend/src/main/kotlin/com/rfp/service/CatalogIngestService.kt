@@ -139,9 +139,10 @@ open class CatalogIngestService(
             // Never fail an import over its class schemas; the admin endpoint can re-run the sync.
             try {
                 val r = schema.syncClasses(touchedClassIds)
-                if (r.added + r.fixed + r.removed + r.merged > 0)
+                if (r.added + r.fixed + r.removed + r.merged + r.values > 0)
                     log("Attribute definitions: ${r.added} added, ${r.fixed} corrected, ${r.removed} identifier(s) removed" +
-                        if (r.merged > 0) ", ${r.merged} duplicate spec name(s) merged" else "")
+                        (if (r.merged > 0) ", ${r.merged} duplicate spec name(s) merged" else "") +
+                        (if (r.values > 0) ", ${r.values} value spelling(s) merged" else ""))
             } catch (e: Exception) {
                 log("Attribute definitions were not updated: ${e.message}")
             }

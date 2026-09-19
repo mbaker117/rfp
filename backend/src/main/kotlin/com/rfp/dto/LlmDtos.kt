@@ -37,6 +37,8 @@ data class AttributeMeta(val name: String, val label: String, val matchOp: Strin
 // ── Task 2d: spec keys of one class that mean the same thing ──
 data class AttributeUsage(val name: String, val products: Int, val samples: List<String>)
 data class DuplicateGroup(val canonical: String, val aliases: List<String>, val valueMap: Map<String, String> = emptyMap())
+/** A text spec of one class and how many products carry each of its values. */
+data class ValueUsage(val name: String, val values: Map<String, Int>)
 
 // ── Task 3 output ────────────────────────────────────────
 data class ParsedTenderLine(

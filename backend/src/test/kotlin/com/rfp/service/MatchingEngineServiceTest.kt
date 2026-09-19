@@ -142,6 +142,34 @@ class MatchingEngineServiceTest {
     }
 
     @Test
+    fun `catalog fractions compare as numbers (13 3-8 in fits a 14 in max length)`() {
+        val line = TenderLine(id = 6L, tender = tender, rawText = "motor", description = "motor",
+            productClass = productClass,
+            attributes = mapper.writeValueAsString(mapOf("overall_length_in" to 14)))
+        val product = Product(id = 8L, supplier = supplier, productClass = productClass,
+            name = "Motor", source = "upload",
+            attributes = mapper.writeValueAsString(mapOf("overall_length_in" to "13 3/8")))
+        val attrDefs = listOf(
+            AttributeDef(id = 4L, productClass = productClass, name = "overall_length_in", label = "Overall Length",
+                datatype = "numeric", matchOp = "lte", canonicalUnit = "in")
+        )
+
+        every { tenderLineRepo.findByTenderId(1L) } returns listOf(line)
+        every { productRepo.findBySupplierIdInAndIsStaleAndNameIgnoreCase(any(), false, any()) } returns emptyList()
+        every { productRepo.findBySupplierIdInAndIsStaleAndMpnIgnoreCase(any(), false, any()) } returns emptyList()
+        every { productRepo.findBySupplierIdInAndIsStaleAndProductClassId(listOf(1L), false, 10L) } returns listOf(product)
+        every { attrDefRepo.findByProductClassId(10L) } returns attrDefs
+        every { matchResultRepo.findByLineId(6L) } returns null
+        every { productPriceRepo.findAllById(any<Iterable<Long>>()) } returns emptyList()
+        every { matchResultRepo.save(any()) } answers { firstArg() }
+
+        service().matchTender(tender, listOf(1L))
+
+        // "13 3/8" was UNVERIFIABLE before; as 13.375 it is <= 14 → COMPLIANT
+        verify { matchResultRepo.save(match { it.score == 100 && it.status == "matched" }) }
+    }
+
+    @Test
     fun `alternatives are capped at 5 and sorted descending`() {
         val line = TenderLine(id = 6L, tender = tender, rawText = "multimeter",
             description = "multimeter", productClass = productClass,

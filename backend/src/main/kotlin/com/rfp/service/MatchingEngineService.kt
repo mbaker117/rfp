@@ -198,8 +198,6 @@ open class MatchingEngineService(
         }
     }
 
-    private fun toDoubleOrNull(v: Any): Double? = when (v) {
-        is Number -> v.toDouble()
-        else -> v.toString().toDoubleOrNull()
-    }
+    // Fraction-aware: catalog values such as "13 3/8" compare as 13.375.
+    private fun toDoubleOrNull(v: Any): Double? = SpecNumbers.parse(v)
 }

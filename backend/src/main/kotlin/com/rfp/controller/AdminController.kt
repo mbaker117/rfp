@@ -5,6 +5,7 @@ import com.rfp.repository.AppUserRepository
 import com.rfp.repository.ProductPriceRepository
 import com.rfp.repository.ProductRepository
 import com.rfp.repository.TenderRepository
+import com.rfp.service.AttributeSchemaService
 import org.springframework.data.domain.PageRequest
 import org.springframework.data.domain.Sort
 import org.springframework.http.ResponseEntity
@@ -34,8 +35,16 @@ class AdminController(
     private val userRepo: AppUserRepository,
     private val productRepo: ProductRepository,
     private val tenderRepo: TenderRepository,
-    private val productPriceRepo: ProductPriceRepository
+    private val productPriceRepo: ProductPriceRepository,
+    private val attributeSchemaService: AttributeSchemaService
 ) {
+
+    /** Bring every class's attribute definitions in line with the specs its products carry. */
+    @PostMapping("/product-classes/sync-attributes")
+    fun syncAttributeDefinitions(): Map<String, Int> {
+        val r = attributeSchemaService.syncAll()
+        return mapOf("added" to r.added, "corrected" to r.fixed, "removed" to r.removed)
+    }
 
     @PostMapping("/refresh")
     fun triggerRefresh(): ResponseEntity<Map<String, String>> {

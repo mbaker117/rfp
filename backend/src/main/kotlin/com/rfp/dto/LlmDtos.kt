@@ -30,6 +30,10 @@ data class AttributeDefDto(
     val allowedValues: List<String> = emptyList()
 )
 
+// ── Task 2c: labels and match rules for specs found on a class's products ──
+data class AttributeSample(val name: String, val samples: List<String>)
+data class AttributeMeta(val name: String, val label: String, val matchOp: String)
+
 // ── Task 3 output ────────────────────────────────────────
 data class ParsedTenderLine(
     val className: String,

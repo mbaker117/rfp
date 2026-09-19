@@ -422,6 +422,32 @@ class LlmService(
         )
     }
 
+    // Task 2c: labels and match rules for specs that products of a class carry but the class does not define yet.
+    // Datatype and unit are decided in code from the stored values and key suffix (AttributeSchemaService).
+    fun defineAttributes(className: String, attributes: List<AttributeSample>): List<AttributeMeta> {
+        val system = """
+            For the product class "$className", decide how a buyer's requirement is compared with each spec below.
+            For each spec key return:
+            - label: a short English label (e.g. "Max. Ambient Temp.")
+            - matchOp: eq (must match exactly: types, classes, frames, voltages, mountings), gte (the product value must be
+              at least the requirement: power, efficiency, service factor, maximum temperature, capacity), or lte (the
+              product value must be at most the requirement: weight, dimensions that must fit, noise, current draw)
+            Respond ONLY with valid JSON: {"attributes":[{"name":string,"label":string,"matchOp":"eq"|"gte"|"lte"}]}
+        """.trimIndent()
+        val user = attributes.joinToString("\n") { a -> "${a.name}: ${a.samples.joinToString(" | ")}" }
+        val requested = attributes.map { it.name }.toSet()
+        val json = parseJson(call(system, user))
+        return (json["attributes"] ?: throw LlmException("LLM response missing 'attributes' key"))
+            .mapNotNull { a ->
+                val name = a["name"]?.asText()?.takeIf { it in requested } ?: return@mapNotNull null
+                AttributeMeta(
+                    name = name,
+                    label = a["label"]?.asText()?.takeIf { it.isNotBlank() } ?: name,
+                    matchOp = a["matchOp"]?.asText()?.takeIf { it in setOf("eq", "gte", "lte") } ?: "eq"
+                )
+            }
+    }
+
     // Task 2b: given navigation links extracted from homepage, find product catalog URLs
     fun identifyProductUrls(baseUrl: String, navigationLinks: String): List<String> {
         val system = """

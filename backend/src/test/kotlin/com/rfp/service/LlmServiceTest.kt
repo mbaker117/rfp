@@ -125,6 +125,30 @@ class LlmServiceTest {
     }
 
     @Test
+    fun `defineAttributes returns labels and match rules only for the requested keys`() {
+        val client = RecordingClient("""
+            {"attributes":[
+              {"name":"insulation_class","label":"Insulation Class","matchOp":"eq"},
+              {"name":"max_ambient_temp_c","label":"Max. Ambient Temp.","matchOp":"gte"},
+              {"name":"invented_key","label":"Invented","matchOp":"eq"},
+              {"name":"speeds","label":"Speeds","matchOp":"between"}
+            ]}
+        """.trimIndent())
+
+        val res = LlmService(client).defineAttributes("AC Motor", listOf(
+            AttributeSample("insulation_class", listOf("B", "F")),
+            AttributeSample("max_ambient_temp_c", listOf("40")),
+            AttributeSample("speeds", listOf("2"))
+        ))
+
+        assertThat(res.map { it.name }).containsExactly("insulation_class", "max_ambient_temp_c", "speeds")
+        assertThat(res.single { it.name == "max_ambient_temp_c" }.matchOp).isEqualTo("gte")
+        assertThat(res.single { it.name == "speeds" }.matchOp).isEqualTo("eq") // invalid rule falls back to eq
+        assertThat(client.userMessage).contains("insulation_class: B | F")
+        assertThat(client.systemPrompt).contains("AC Motor")
+    }
+
+    @Test
     fun `catalog prompt keeps other item numbers in a row out of item_no`() {
         val client = RecordingClient("""{"products":[]}""")
         LlmService(client).parseCatalogChunk("page text", emptyList())

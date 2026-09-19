@@ -57,6 +57,7 @@ class AttributeSchemaService(
      */
     fun syncClasses(classIds: Collection<Long>, alwaysMerge: Boolean = false): SyncResult =
         classIds.distinct().fold(SyncResult()) { acc, id ->
+            normalizeAccessorySpecs(id)
             val synced = syncClass(id)
             val merged = if (alwaysMerge || synced.added > 0) mergeUntilStable(id) else 0
             val values = mergeValueSpellings(id)
@@ -201,6 +202,34 @@ class AttributeSchemaService(
         return mapped
     }
 
+    /**
+     * Applies [AccessorySpecs] to the class's stored products (rows imported before it existed) and removes the
+     * definitions of keys no product carries any more. Returns the number of products rewritten.
+     */
+    fun normalizeAccessorySpecs(classId: Long): Int {
+        val products = productRepo.findByProductClassId(classId)
+        val current = products.map { p ->
+            @Suppress("UNCHECKED_CAST")
+            val attrs = readAttributes(p.attributes).filterValues { it != null } as Map<String, Any>
+            Triple(p, attrs, AccessorySpecs.normalize(attrs))
+        }
+        val rewritten = current.filter { (_, attrs, out) -> out != attrs }
+        if (rewritten.isNotEmpty()) {
+            productRepo.saveAll(rewritten.map { (p, _, out) ->
+                p.copy(attributes = mapper.writeValueAsString(out), updatedAt = Instant.now())
+            })
+        }
+        // Also catches defs left behind by an earlier pass.
+        val used = current.flatMap { it.third.keys }.toSet()
+        val unused = attrDefRepo.findByProductClassId(classId)
+            .filter { AccessorySpecs.isSourceKey(it.name) && it.name !in used }
+        if (unused.isNotEmpty()) {
+            log.info("Removing accessory column defs no product carries: {}", unused.map { it.name })
+            attrDefRepo.deleteAll(unused)
+        }
+        return rewritten.size
+    }
+
     /** Follows variant -> canonical chains to a value that is not itself a variant; drops cycles and number clashes. */
     private fun resolveSpellings(raw: Map<String, String>): Map<String, String> =
         raw.mapNotNull { (variant, first) ->
@@ -219,13 +248,14 @@ class AttributeSchemaService(
 
     /** Translates alias keys and value spellings to the class's canonical form (new products and tender lines). */
     fun canonicalize(classId: Long, attributes: Map<String, Any>): Map<String, Any> {
+        val split = AccessorySpecs.normalize(attributes)
         val aliases = aliasRepo?.findByClassId(classId)?.associate { it.alias to it.canonicalName }.orEmpty()
         val valueMaps = attrDefRepo.findByProductClassId(classId)
             .filter { it.valueAliases.isNotBlank() && it.valueAliases != "{}" }
             .associate { d -> d.name to readStringMap(d.valueAliases).mapKeys { it.key.trim().lowercase() } }
-        if (aliases.isEmpty() && valueMaps.isEmpty()) return attributes
+        if (aliases.isEmpty() && valueMaps.isEmpty()) return split
         val out = LinkedHashMap<String, Any>()
-        attributes.forEach { (k, v) ->
+        split.forEach { (k, v) ->
             val key = aliases[k] ?: k
             if (key == k || !out.containsKey(key)) out[key] = v
         }

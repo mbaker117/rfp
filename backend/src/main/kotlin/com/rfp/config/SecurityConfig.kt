@@ -1,6 +1,7 @@
 package com.rfp.config
 
 import com.rfp.security.JwtFilter
+import jakarta.servlet.DispatcherType
 import jakarta.servlet.http.HttpServletResponse
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
@@ -25,6 +26,10 @@ class SecurityConfig(private val jwtFilter: JwtFilter) {
         .cors { it.configurationSource(corsConfigurationSource()) }
         .sessionManagement { it.sessionCreationPolicy(SessionCreationPolicy.STATELESS) }
         .authorizeHttpRequests {
+            // Errors raised via response.sendError() are re-dispatched to /error. JwtFilter does not
+            // run on that ERROR dispatch, so without this every 403/404/413 reached the client as 401.
+            it.dispatcherTypeMatchers(DispatcherType.ERROR).permitAll()
+            it.requestMatchers(AntPathRequestMatcher("/error")).permitAll()
             it.requestMatchers(AntPathRequestMatcher("/auth/**")).permitAll()
             // Use AntPathRequestMatcher to bypass Spring MVC handler-mapping checks.
             // This ensures the rules apply even in @WebMvcTest contexts where not all
@@ -37,6 +42,10 @@ class SecurityConfig(private val jwtFilter: JwtFilter) {
             // Return 401 for unauthenticated requests (not the default 403).
             exceptions.authenticationEntryPoint { _, response, _ ->
                 response.sendError(HttpServletResponse.SC_UNAUTHORIZED, "Unauthorized")
+            }
+            // Authenticated but lacking the role (e.g. USER calling /admin/**).
+            exceptions.accessDeniedHandler { _, response, _ ->
+                response.sendError(HttpServletResponse.SC_FORBIDDEN, "Forbidden")
             }
         }
         .addFilterBefore(jwtFilter, UsernamePasswordAuthenticationFilter::class.java)

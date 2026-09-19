@@ -14,8 +14,8 @@ spring:
     locations: classpath:db/migration
   servlet:
     multipart:
-      max-file-size: 50MB
-      max-request-size: 55MB
+      max-file-size: 1GB
+      max-request-size: 1030MB
 
 server:
   port: 8080

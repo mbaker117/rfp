@@ -2,14 +2,19 @@ package com.rfp.service
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
+import com.rfp.domain.AttributeAlias
 import com.rfp.domain.AttributeDef
 import com.rfp.dto.AttributeMeta
 import com.rfp.dto.AttributeSample
+import com.rfp.dto.AttributeUsage
+import com.rfp.repository.AttributeAliasRepository
 import com.rfp.repository.AttributeDefRepository
 import com.rfp.repository.ProductClassRepository
 import com.rfp.repository.ProductRepository
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
+import java.time.Instant
+import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.max
 
@@ -28,19 +33,144 @@ class AttributeSchemaService(
     private val productClassRepo: ProductClassRepository,
     private val attrDefRepo: AttributeDefRepository,
     private val productRepo: ProductRepository,
-    private val llmService: LlmService
+    private val llmService: LlmService,
+    private val aliasRepo: AttributeAliasRepository? = null
 ) {
-    data class SyncResult(val added: Int = 0, val fixed: Int = 0, val removed: Int = 0) {
-        operator fun plus(o: SyncResult) = SyncResult(added + o.added, fixed + o.fixed, removed + o.removed)
+    data class SyncResult(val added: Int = 0, val fixed: Int = 0, val removed: Int = 0, val merged: Int = 0) {
+        operator fun plus(o: SyncResult) =
+            SyncResult(added + o.added, fixed + o.fixed, removed + o.removed, merged + o.merged)
     }
 
     private val log = LoggerFactory.getLogger(javaClass)
     private val mapper = ObjectMapper().apply { findAndRegisterModules() }
 
-    fun syncAll(): SyncResult = syncClasses(productClassRepo.findAll().map { it.id })
+    /** Admin action: sync every class and look for duplicate spec names in each (one LLM call per class). */
+    fun syncAll(): SyncResult = syncClasses(productClassRepo.findAll().map { it.id }, alwaysMerge = true)
 
-    fun syncClasses(classIds: Collection<Long>): SyncResult =
-        classIds.distinct().fold(SyncResult()) { acc, id -> acc + syncClass(id) }
+    /**
+     * After an import: sync the touched classes, and look for duplicate spec names only in classes that just
+     * gained definitions (a new name is when a duplicate can appear), then sync those again.
+     */
+    fun syncClasses(classIds: Collection<Long>, alwaysMerge: Boolean = false): SyncResult =
+        classIds.distinct().fold(SyncResult()) { acc, id ->
+            val synced = syncClass(id)
+            val merged = if (alwaysMerge || synced.added > 0) mergeUntilStable(id) else 0
+            acc + synced + (if (merged > 0) syncClass(id) else SyncResult()) + SyncResult(merged = merged)
+        }
+
+    /** The LLM can miss a group in one pass; repeat until a pass merges nothing (at most [MAX_MERGE_PASSES]). */
+    fun mergeUntilStable(classId: Long): Int {
+        var total = 0
+        repeat(MAX_MERGE_PASSES) {
+            val merged = mergeDuplicates(classId)
+            if (merged == 0) return total
+            total += merged
+        }
+        return total
+    }
+
+    /**
+     * Merges spec keys of one class that are the same spec under different names ("phase"/"phases") into the
+     * canonical key: moves alias values on every product, translates value spellings, removes the alias
+     * definitions and records the aliases for [canonicalize]. The LLM proposes groups; a group is vetoed when its
+     * keys disagree on any product that carries both, because then they are different specs. Returns groups merged.
+     */
+    fun mergeDuplicates(classId: Long): Int {
+        val aliasRepo = aliasRepo ?: return 0
+        val productClass = productClassRepo.findById(classId).orElse(null) ?: return 0
+        val defs = attrDefRepo.findByProductClassId(classId).filterNot { isIdentifier(it.name) }
+        if (defs.size < 2) return 0
+        val products = productRepo.findByProductClassId(classId)
+        val working = products.associate { p -> p.id to readAttributes(p.attributes).toMutableMap() }
+
+        val usage = defs.map { d ->
+            val seen = working.values.mapNotNull { it[d.name] }
+            AttributeUsage(d.name, seen.size, seen.map { it.toString() }.distinct().take(SAMPLES_PER_KEY + 3))
+        }
+        val groups = try {
+            llmService.findDuplicateAttributes(productClass.name, usage)
+        } catch (e: Exception) {
+            log.warn("Duplicate spec detection for class '{}' failed: {}", productClass.name, e.message)
+            return 0
+        }
+
+        val defsByName = defs.associateBy { it.name }
+        val knownAliases = aliasRepo.findByClassId(classId).map { it.alias }.toSet()
+        val changed = mutableSetOf<Long>()
+        var merged = 0
+        groups.forEach { g ->
+            val canonicalDef = defsByName[g.canonical] ?: return@forEach
+            val aliasDefs = g.aliases.mapNotNull { defsByName[it] }
+            if (aliasDefs.isEmpty()) return@forEach
+            val valueMap = g.valueMap.mapKeys { it.key.trim().lowercase() }
+            fun translate(v: Any?): Any? = v?.let { valueMap[it.toString().trim().lowercase()] ?: it }
+
+            val conflict = working.values.any { a ->
+                val c = a[g.canonical] ?: return@any false
+                g.aliases.any { al -> a[al]?.let { !sameValue(translate(it), translate(c)) } ?: false }
+            }
+            if (conflict) {
+                log.info("Not merging {} into {} for class '{}': they differ on the same products", g.aliases, g.canonical, productClass.name)
+                return@forEach
+            }
+
+            working.forEach { (id, a) ->
+                g.aliases.forEach { al ->
+                    if (a.containsKey(al)) {
+                        val v = a.remove(al)
+                        if (a[g.canonical] == null) a[g.canonical] = v
+                        changed += id
+                    }
+                }
+                a[g.canonical]?.let { v -> translate(v).let { t -> if (t != v) { a[g.canonical] = t; changed += id } } }
+            }
+            if (g.valueMap.isNotEmpty()) {
+                val all = readStringMap(canonicalDef.valueAliases) + g.valueMap
+                attrDefRepo.save(canonicalDef.copy(valueAliases = mapper.writeValueAsString(all)))
+            }
+            attrDefRepo.deleteAll(aliasDefs)
+            g.aliases.filter { it !in knownAliases }.forEach {
+                aliasRepo.save(AttributeAlias(classId = classId, alias = it, canonicalName = g.canonical))
+            }
+            merged++
+        }
+        if (changed.isNotEmpty()) {
+            productRepo.saveAll(products.filter { it.id in changed }.map {
+                it.copy(attributes = mapper.writeValueAsString(working[it.id]), updatedAt = Instant.now())
+            })
+        }
+        return merged
+    }
+
+    /** Translates alias keys and value spellings to the class's canonical form (new products and tender lines). */
+    fun canonicalize(classId: Long, attributes: Map<String, Any>): Map<String, Any> {
+        val aliases = aliasRepo?.findByClassId(classId)?.associate { it.alias to it.canonicalName }.orEmpty()
+        val valueMaps = attrDefRepo.findByProductClassId(classId)
+            .filter { it.valueAliases.isNotBlank() && it.valueAliases != "{}" }
+            .associate { d -> d.name to readStringMap(d.valueAliases).mapKeys { it.key.trim().lowercase() } }
+        if (aliases.isEmpty() && valueMaps.isEmpty()) return attributes
+        val out = LinkedHashMap<String, Any>()
+        attributes.forEach { (k, v) ->
+            val key = aliases[k] ?: k
+            if (key == k || !out.containsKey(key)) out[key] = v
+        }
+        valueMaps.forEach { (k, m) -> out[k]?.let { v -> m[v.toString().trim().lowercase()]?.let { out[k] = it } } }
+        return out
+    }
+
+    private fun sameValue(a: Any?, b: Any?): Boolean {
+        if (a == null || b == null) return a == b
+        val na = SpecNumbers.parse(a)
+        val nb = SpecNumbers.parse(b)
+        if (na != null && nb != null) return abs(na - nb) < 1e-9
+        return a.toString().trim().equals(b.toString().trim(), ignoreCase = true)
+    }
+
+    private fun readAttributes(json: String): Map<String, Any?> =
+        runCatching { mapper.readValue<Map<String, Any?>>(json) }.getOrDefault(emptyMap())
+
+    private fun readStringMap(json: String): Map<String, String> =
+        runCatching { mapper.readValue<Map<String, String>>(json) }.getOrDefault(emptyMap())
 
     fun syncClass(classId: Long): SyncResult {
         val productClass = productClassRepo.findById(classId).orElse(null) ?: return SyncResult()
@@ -120,6 +250,7 @@ class AttributeSchemaService(
         const val MIN_SHARE = 0.05
         const val NUMERIC_SHARE = 0.9
         const val SAMPLES_PER_KEY = 5
+        const val MAX_MERGE_PASSES = 3
         val IDENTIFIER_KEYS = setOf("item_no", "mpn", "manualLink", "description", "sku")
         /** Key suffix -> canonical unit, using the unit_conversion table's symbols where it has them. */
         val UNIT_SUFFIXES = linkedMapOf(

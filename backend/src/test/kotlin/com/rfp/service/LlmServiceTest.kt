@@ -125,6 +125,25 @@ class LlmServiceTest {
     }
 
     @Test
+    fun `findDuplicateAttributes keeps only groups over known keys`() {
+        val client = RecordingClient("""
+            {"groups":[
+              {"canonical":"phase","aliases":["phases"],"valueMap":{"Single":"1","Three":"3"}},
+              {"canonical":"frame","aliases":["frame","nope"]},
+              {"canonical":"ghost","aliases":["phase"]}
+            ]}
+        """.trimIndent())
+
+        val groups = LlmService(client).findDuplicateAttributes("AC Motor", listOf(
+            AttributeUsage("phase", 680, listOf("1", "Single")), AttributeUsage("phases", 246, listOf("3")),
+            AttributeUsage("frame", 2529, listOf("56H"))
+        ))
+
+        assertThat(groups).containsExactly(DuplicateGroup("phase", listOf("phases"), mapOf("Single" to "1", "Three" to "3")))
+        assertThat(client.userMessage).contains("phases (246 products): 3")
+    }
+
+    @Test
     fun `defineAttributes returns labels and match rules only for the requested keys`() {
         val client = RecordingClient("""
             {"attributes":[

@@ -17,7 +17,8 @@ open class TenderExtractionService(
     private val llmService: LlmService,
     private val unitService: UnitNormalizationService,
     private val docParser: DocumentParsingService,
-    private val matchingService: MatchingEngineService
+    private val matchingService: MatchingEngineService,
+    private val schemaService: AttributeSchemaService? = null
 ) {
     private val mapper = ObjectMapper().apply { findAndRegisterModules() }
 
@@ -57,7 +58,9 @@ open class TenderExtractionService(
         lines.forEachIndexed { idx, line ->
             val productClass = productClassRepo.findByNameIgnoreCase(line.className)
             val defs = productClass?.let { attrDefRepo.findByProductClassId(it.id) } ?: emptyList()
-            val normalizedAttrs = unitService.normalizeAttributes(line.attributes, defs)
+            // Duplicate spec names were merged per class: use the canonical names products are stored under.
+            val requiredAttrs = productClass?.let { schemaService?.canonicalize(it.id, line.attributes) } ?: line.attributes
+            val normalizedAttrs = unitService.normalizeAttributes(requiredAttrs, defs)
             val attrsJson = mapper.writeValueAsString(normalizedAttrs)
 
             tenderLineRepo.save(TenderLine(

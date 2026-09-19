@@ -337,6 +337,7 @@ class CatalogIngestChunkingTest {
         every { llmService.parseCatalogChunk(any(), any(), any()) } answers { ok(productFor(firstArg())) }
         val schema = mockk<AttributeSchemaService>()
         every { schema.syncClasses(any()) } returns AttributeSchemaService.SyncResult(added = 2, fixed = 1)
+        every { schema.canonicalize(any(), any()) } answers { secondArg() }
         val svc = CatalogIngestService(
             supplierRepo, productClassRepo, attrDefRepo, productRepo,
             productPriceRepo, priceHistoryRepo, ingestRepo, llmService, unitService, docParser,
@@ -355,6 +356,7 @@ class CatalogIngestChunkingTest {
         every { llmService.parseCatalogChunk(any(), any(), any()) } answers { ok(productFor(firstArg())) }
         val schema = mockk<AttributeSchemaService>()
         every { schema.syncClasses(any()) } throws RuntimeException("db hiccup")
+        every { schema.canonicalize(any(), any()) } answers { secondArg() }
         val svc = CatalogIngestService(
             supplierRepo, productClassRepo, attrDefRepo, productRepo,
             productPriceRepo, priceHistoryRepo, ingestRepo, llmService, unitService, docParser,

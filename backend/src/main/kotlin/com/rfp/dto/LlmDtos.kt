@@ -34,6 +34,10 @@ data class AttributeDefDto(
 data class AttributeSample(val name: String, val samples: List<String>)
 data class AttributeMeta(val name: String, val label: String, val matchOp: String)
 
+// ── Task 2d: spec keys of one class that mean the same thing ──
+data class AttributeUsage(val name: String, val products: Int, val samples: List<String>)
+data class DuplicateGroup(val canonical: String, val aliases: List<String>, val valueMap: Map<String, String> = emptyMap())
+
 // ── Task 3 output ────────────────────────────────────────
 data class ParsedTenderLine(
     val className: String,

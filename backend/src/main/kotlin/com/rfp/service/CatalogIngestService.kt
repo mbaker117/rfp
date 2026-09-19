@@ -201,6 +201,27 @@ open class CatalogIngestService(
     private fun isFatal(e: Throwable): Boolean =
         e is LlmException && e.message?.let { FATAL_LLM_ERROR.containsMatchIn(it) } == true
 
+    /**
+     * Matches an extracted product to an existing row: supplier item number, then part number (only a row with no
+     * conflicting item number), and by name only when the product has neither identifier. Catalog names are generic
+     * ("Capacitor-Start AC Motor 1/2 HP 56C"), so a name match for an identified product would merge different items.
+     */
+    private fun findExisting(p: ParsedProduct, supplierId: Long): Product? {
+        val itemNo = p.attributes["item_no"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+        val mpn = p.mpn?.trim()?.takeIf { it.isNotEmpty() }
+        itemNo?.let { productRepo.findAllBySupplierIdAndItemNo(supplierId, it).firstOrNull()?.let { found -> return found } }
+        if (mpn != null) {
+            return productRepo.findAllBySupplierIdAndMpnIgnoreCase(supplierId, mpn)
+                .firstOrNull { row -> itemNo == null || storedItemNo(row).let { it == null || it.equals(itemNo, ignoreCase = true) } }
+        }
+        if (itemNo != null) return null
+        return productRepo.findAllBySupplierIdAndNameIgnoreCase(supplierId, p.name).firstOrNull()
+    }
+
+    private fun storedItemNo(product: Product): String? =
+        product.attributes?.let { runCatching { mapper.readTree(it).path("item_no").asText(null) }.getOrNull() }
+            ?.takeIf { it.isNotBlank() }
+
     private fun saveProducts(parsed: List<ParsedProduct>, supplier: Supplier, source: String, seenIds: MutableSet<Long>) {
         parsed.forEach { p ->
             val productClass = resolveOrCreateClass(p.className, parsed
@@ -211,12 +232,19 @@ open class CatalogIngestService(
             val normalizedAttrs = unitService.normalizeAttributes(p.attributes, defs)
             val attrsJson = mapper.writeValueAsString(normalizedAttrs)
 
-            val existing = (p.mpn?.let { productRepo.findBySupplierIdAndMpnIgnoreCase(supplier.id, it) }
-                ?: productRepo.findBySupplierIdAndNameIgnoreCase(supplier.id, p.name))
+            val existing = findExisting(p, supplier.id)
 
             val product = if (existing != null) {
                 seenIds.add(existing.id)
-                productRepo.save(existing.copy(attributes = attrsJson, isStale = false, updatedAt = Instant.now()))
+                // Identifiers and name are refreshed too, which also repairs rows an older name-based match merged.
+                productRepo.save(existing.copy(
+                    name = p.name,
+                    mpn = p.mpn?.takeIf { it.isNotBlank() } ?: existing.mpn,
+                    productClass = productClass,
+                    attributes = attrsJson,
+                    isStale = false,
+                    updatedAt = Instant.now()
+                ))
             } else {
                 val saved = productRepo.save(Product(
                     supplier = supplier,

@@ -44,8 +44,8 @@ class CatalogIngestServiceTest {
         ))
         every { productClassRepo.findByNameIgnoreCase("Multimeter") } returns productClass
         every { unitService.normalizeAttributes(any(), any()) } answers { firstArg() }
-        every { productRepo.findBySupplierIdAndMpnIgnoreCase(1L, "FL179") } returns null
-        every { productRepo.findBySupplierIdAndNameIgnoreCase(1L, "Fluke 179") } returns null
+        every { productRepo.findAllBySupplierIdAndMpnIgnoreCase(1L, "FL179") } returns emptyList()
+        every { productRepo.findAllBySupplierIdAndNameIgnoreCase(1L, "Fluke 179") } returns emptyList()
         every { productRepo.save(any()) } answers { firstArg<Product>().copy(id = 5L) }
         every { productPriceRepo.findById(any()) } returns java.util.Optional.empty()
         every { productPriceRepo.save(any()) } answers { firstArg() }

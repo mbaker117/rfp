@@ -19,6 +19,17 @@ interface ProductRepository : JpaRepository<Product, Long> {
     fun findBySupplierIdAndMpnIgnoreCase(supplierId: Long, mpn: String): Product?
     fun findBySupplierIdAndNameIgnoreCase(supplierId: Long, name: String): Product?
     fun findBySupplierId(supplierId: Long): List<Product>
+
+    // Catalog upload matching: lists, because generic names and shared part numbers can legitimately repeat.
+    fun findAllBySupplierIdAndMpnIgnoreCase(supplierId: Long, mpn: String): List<Product>
+    fun findAllBySupplierIdAndNameIgnoreCase(supplierId: Long, name: String): List<Product>
+
+    /** Supplier's own item/SKU number stored in the attributes bag; indexed by V12. */
+    @Query(
+        value = "SELECT * FROM product WHERE supplier_id = :supplierId AND upper(attributes->>'item_no') = upper(:itemNo)",
+        nativeQuery = true
+    )
+    fun findAllBySupplierIdAndItemNo(supplierId: Long, itemNo: String): List<Product>
     fun findBySupplierIdAndIdentityKey(supplierId: Long, identityKey: String): Product?
 
     @Query(

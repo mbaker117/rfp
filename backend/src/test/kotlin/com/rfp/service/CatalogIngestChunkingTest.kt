@@ -68,8 +68,9 @@ class CatalogIngestChunkingTest {
         every { productClassRepo.findByNameIgnoreCase("Gas Detector") } returns productClass
         every { attrDefRepo.findByProductClassId(10L) } returns emptyList()
         every { unitService.normalizeAttributes(any(), any()) } answers { firstArg() }
-        every { productRepo.findBySupplierIdAndMpnIgnoreCase(1L, any()) } returns null
-        every { productRepo.findBySupplierIdAndNameIgnoreCase(1L, any()) } returns null
+        every { productRepo.findAllBySupplierIdAndItemNo(1L, any()) } returns emptyList()
+        every { productRepo.findAllBySupplierIdAndMpnIgnoreCase(1L, any()) } returns emptyList()
+        every { productRepo.findAllBySupplierIdAndNameIgnoreCase(1L, any()) } returns emptyList()
         every { productRepo.save(any()) } answers {
             val p = firstArg<Product>()
             (if (p.id == 0L) p.copy(id = ids.incrementAndGet()) else p).also { savedProducts.add(it) }

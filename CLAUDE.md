@@ -76,7 +76,7 @@ Browser → Next.js (3000) → Spring Boot (8080) → PostgreSQL (5432)
 
 **A. Catalog ingestion → `product` rows** (per supplier)
 
-1. *File upload* — `POST /suppliers/{id}/catalog/upload` → `CatalogIngestService.ingestFile` (`@Async`) → `DocumentParsingService` → `LlmService.parseCatalogBatch` → `UnitNormalizationService` → upsert `product` + `product_price` (+ `product_price_history` on price change). Products from this supplier not seen in the run are marked `is_stale`, **except** crawler-discovered ones (`canonicalSourceUrl != null`).
+1. *File upload* — `POST /suppliers/{id}/catalog/upload` → `CatalogIngestService.ingestFile` (`@Async`) → `DocumentParsingService` (each PDF page ends with a form feed) → `CatalogChunker` splits the text into `rfp.catalog.chunk-chars` chunks → `LlmService.parseCatalogBatch` per chunk (`rfp.catalog.parallelism` concurrent calls, capped at `rfp.catalog.max-chunks`) → `UnitNormalizationService` → upsert `product` + `product_price` (+ `product_price_history` on price change), saved in document order with per-chunk progress in `catalog_ingest.step_log`. A failed chunk is skipped; a 400/401/403 LLM error or 3 consecutive failures stop the run. Only a complete, failure-free run marks this supplier's unseen products `is_stale`, **except** crawler-discovered ones (`canonicalSourceUrl != null`).
 2. *Website crawl* — `POST /suppliers/{id}/catalog/scrape` → `CrawlCoordinator.enqueue` when the supplier has an `officialWebsite`, else the legacy `ScrapeService` path.
 
 **B. Tender processing → report + proposals**

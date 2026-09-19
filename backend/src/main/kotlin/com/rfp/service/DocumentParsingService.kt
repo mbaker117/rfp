@@ -19,7 +19,8 @@ class DocumentParsingService {
     }
 
     private fun parsePdf(bytes: ByteArray): String =
-        Loader.loadPDF(bytes).use { PDFTextStripper().getText(it) }
+        // Form feed after each page lets CatalogChunker keep pages whole.
+        Loader.loadPDF(bytes).use { PDFTextStripper().apply { pageEnd = "\u000C" }.getText(it) }
 
     private fun parseWord(bytes: ByteArray): String =
         XWPFDocument(ByteArrayInputStream(bytes)).use { doc ->

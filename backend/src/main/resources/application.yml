@@ -30,6 +30,10 @@ rfp:
     model: ${RFP_LLM_MODEL:claude-sonnet-4-6}
     base-url: ${RFP_LLM_BASE_URL:}            # leave blank to use provider default
     max-tokens: 8192
+  catalog:
+    chunk-chars: 12000   # text per LLM extraction call; small enough that one response holds every product in it
+    max-chunks: 150      # cost cap per upload (~450-600 PDF pages); the rest of a larger document is skipped and logged
+    parallelism: 4       # concurrent LLM calls per upload
   scraper:
     throttle-ms: 2000
     refresh-days: 7

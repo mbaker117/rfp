@@ -13,6 +13,12 @@ import java.security.MessageDigest
 
 class LlmException(message: String) : RuntimeException(message)
 
+/**
+ * Bump whenever the catalog extraction prompt or output format changes: it is part of the
+ * catalog chunk cache key, so cached results from an older prompt stop matching.
+ */
+const val CATALOG_PROMPT_VERSION = "catalog-v4"
+
 /** [truncated]: the answer hit the output token limit, so rows after the last complete product are missing. */
 data class CatalogBatchResult(val products: List<ParsedProduct>, val truncated: Boolean)
 
@@ -316,10 +322,11 @@ class LlmService(
               snake_case keys only for specs not covered.
 
             ATTRIBUTES (inside "attributes", for EVERY product)
-            - "description": a short plain-text summary (1-2 sentences, in English)
-            - "manualLink": URL of the product datasheet or manual if printed, else null
-            - "item_no": the supplier's own item/SKU number if printed (the manufacturer model goes in "mpn")
-            - "brand": the manufacturer name if printed
+            - Keep the output compact: Do not write descriptions or summaries. Omit any key whose value is not printed
+              for that product (no null, empty or "N/A" values) - this applies to "mpn", "price" and "currency" too.
+            - "manualLink": URL of the product datasheet or manual, if printed
+            - "item_no": the supplier's own item/SKU number, if printed (the manufacturer model goes in "mpn")
+            - "brand": the manufacturer name, if printed
             - ALL technical specifications: every numeric spec with the unit suffixed to the key
               (e.g. "weight_kg":1.2, "voltage_v":220, "frequency_hz":50, "accuracy_pct":0.5), every boolean
               feature (e.g. "waterproof":true), every enumerated property. Include every column of a spec table.
@@ -330,13 +337,13 @@ class LlmService(
               "115/230V", "Explosion-Proof") apply to every row under it: copy them onto each of those products.
 
             PRICE
-            - "price": the listed unit price as a plain number (no currency symbols or thousands separators), or null
+            - "price": the listed unit price as a plain number (no currency symbols or thousands separators); omit it
               when no price is printed for that item. Never estimate.
-            - "currency": the ISO 4217 code of the printed currency ("$" -> "USD", "JD"/"JOD" -> "JOD"), or null.
+            - "currency": the ISO 4217 code of the printed currency ("$" -> "USD", "JD"/"JOD" -> "JOD"); omit it with the price.
 
-            Respond ONLY with valid JSON — no markdown, no commentary:
-            {"products":[{"className":string,"name":string,"mpn":string|null,
-              "price":number|null,"currency":string|null,"attributes":{"description":string,"manualLink":string|null,...otherKeys}}]}
+            Respond ONLY with compact valid JSON (no indentation) — no markdown, no commentary. Optional keys marked "?":
+            {"products":[{"className":string,"name":string,"mpn"?:string,"price"?:number,"currency"?:string,
+              "attributes":{"item_no"?:string,"brand"?:string,"manualLink"?:string,...specKeys}}]}
         """.trimIndent() + continuation
         val response = llmClient.callDetailed(system, rawText.take(100_000))   // skip cache — site content varies
         val (json, repaired) = parseJsonDetailed(response.text)
@@ -349,7 +356,7 @@ class LlmService(
                     mpn = p["mpn"]?.takeIf { !it.isNull }?.asText(),
                     price = p["price"]?.takeIf { !it.isNull }?.let { catalogPrice(it.asText()) },
                     currency = p["currency"]?.takeIf { !it.isNull }?.asText()?.takeIf { it.isNotBlank() } ?: "JOD",
-                    attributes = mapper.readValue(p["attributes"].toString())
+                    attributes = p["attributes"]?.takeIf { it.isObject }?.let { mapper.readValue(it.toString()) } ?: emptyMap()
                 )
             },
             // A cut-off answer that was salvaged by repairTruncatedProductsJson is truncated too,

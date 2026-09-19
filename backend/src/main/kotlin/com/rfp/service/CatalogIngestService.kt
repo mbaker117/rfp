@@ -2,13 +2,16 @@
 package com.rfp.service
 
 import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.module.kotlin.readValue
 import com.rfp.domain.*
 import com.rfp.dto.*
 import com.rfp.repository.*
 import org.springframework.beans.factory.annotation.Value
+import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.scheduling.annotation.Async
 import org.springframework.stereotype.Service
 import java.math.BigDecimal
+import java.security.MessageDigest
 import java.time.Instant
 import java.util.concurrent.Callable
 import java.util.concurrent.ExecutionException
@@ -28,7 +31,9 @@ open class CatalogIngestService(
     private val docParser: DocumentParsingService,
     @Value("\${rfp.catalog.chunk-chars:12000}") private val chunkChars: Int = 12_000,
     @Value("\${rfp.catalog.max-chunks:150}") private val maxChunks: Int = 150,
-    @Value("\${rfp.catalog.parallelism:4}") private val parallelism: Int = 4
+    @Value("\${rfp.catalog.parallelism:4}") private val parallelism: Int = 4,
+    private val chunkCacheRepo: CatalogChunkCacheRepository? = null,
+    @Value("\${rfp.llm.model:}") private val model: String = ""
 ) {
     private val mapper = ObjectMapper().apply { findAndRegisterModules() }
 
@@ -81,7 +86,7 @@ open class CatalogIngestService(
         try {
             toProcess.withIndex().chunked(workers).forEach { wave ->
                 val knownClasses = knownClassSchemas()
-                val futures = wave.map { (i, text) -> i to pool.submit(Callable { extractCompletely(text, knownClasses) }) }
+                val futures = wave.map { (i, text) -> i to pool.submit(Callable { extractCached(text, knownClasses) }) }
                 for ((i, future) in futures) {
                     val label = "Chunk ${i + 1}/${toProcess.size}"
                     val outcome = try {
@@ -105,6 +110,7 @@ open class CatalogIngestService(
                     if (outcome.stillTruncated) incompleteChunks++
                     saveProducts(outcome.products, supplier, source, seenIds)
                     log("$label: ${outcome.products.size} product(s)" + when {
+                        outcome.fromCache -> " (from cache)"
                         outcome.stillTruncated -> " (WARNING: some rows may be missing, the answer was still cut off after ${outcome.calls} calls)"
                         outcome.calls > 1 -> " (answer hit the output limit; continued in ${outcome.calls} calls)"
                         else -> ""
@@ -133,7 +139,32 @@ open class CatalogIngestService(
         supplierRepo.save(ingest.supplier.copy(scrapeStatus = "DONE", lastScrapedAt = Instant.now()))
     }
 
-    private data class ChunkOutcome(val products: List<ParsedProduct>, val calls: Int, val stillTruncated: Boolean)
+    private data class ChunkOutcome(
+        val products: List<ParsedProduct>,
+        val calls: Int,
+        val stillTruncated: Boolean,
+        val fromCache: Boolean = false
+    )
+
+    /** Serves the chunk from [chunkCacheRepo] when the same text was already extracted with this prompt and model. */
+    private fun extractCached(text: String, knownClasses: List<ClassSchema>): ChunkOutcome {
+        val repo = chunkCacheRepo ?: return extractCompletely(text, knownClasses)
+        val key = sha256("$CATALOG_PROMPT_VERSION|$model|$text")
+        repo.findByCacheKey(key)?.let { cached ->
+            return ChunkOutcome(mapper.readValue(cached.products), calls = 0, stillTruncated = false, fromCache = true)
+        }
+        val outcome = extractCompletely(text, knownClasses)
+        if (!outcome.stillTruncated) {
+            try {
+                repo.save(CatalogChunkCache(cacheKey = key, products = mapper.writeValueAsString(outcome.products),
+                    productCount = outcome.products.size))
+            } catch (_: DataIntegrityViolationException) { /* same chunk cached concurrently */ }
+        }
+        return outcome
+    }
+
+    private fun sha256(s: String): String =
+        MessageDigest.getInstance("SHA-256").digest(s.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
 
     /**
      * Extracts [text]. While the answer is cut off at the output token limit, asks again for the same whole

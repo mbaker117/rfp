@@ -36,10 +36,14 @@ class CatalogIngestChunkingTest {
     /** Four 40-char pages; with chunkChars=50 each page becomes its own chunk. */
     private val fourPages = (1..4).joinToString("\u000C") { "PAGE-$it ".padEnd(40, '.') }
 
-    private fun service(maxChunks: Int = 150, parallelism: Int = 2, chunkChars: Int = 50) = CatalogIngestService(
+    private val chunkCache = java.util.concurrent.ConcurrentHashMap<String, CatalogChunkCache>()
+    private val chunkCacheRepo = mockk<CatalogChunkCacheRepository>()
+
+    private fun service(maxChunks: Int = 150, parallelism: Int = 2, chunkChars: Int = 50, model: String = "model-a") = CatalogIngestService(
         supplierRepo, productClassRepo, attrDefRepo, productRepo,
         productPriceRepo, priceHistoryRepo, ingestRepo, llmService, unitService, docParser,
-        chunkChars = chunkChars, maxChunks = maxChunks, parallelism = parallelism
+        chunkChars = chunkChars, maxChunks = maxChunks, parallelism = parallelism,
+        chunkCacheRepo = chunkCacheRepo, model = model
     )
 
     private fun productFor(chunk: String): List<ParsedProduct> {
@@ -71,6 +75,8 @@ class CatalogIngestChunkingTest {
             (if (p.id == 0L) p.copy(id = ids.incrementAndGet()) else p).also { savedProducts.add(it) }
         }
         every { productRepo.findBySupplierId(1L) } answers { existingProducts.toList() }
+        every { chunkCacheRepo.findByCacheKey(any()) } answers { chunkCache[firstArg()] }
+        every { chunkCacheRepo.save(any()) } answers { firstArg<CatalogChunkCache>().also { chunkCache[it.cacheKey] = it } }
     }
 
     @Test
@@ -245,5 +251,53 @@ class CatalogIngestChunkingTest {
         service(chunkChars = 500).runIngest(ingest, denseTable, "upload")
 
         assertThat(calls[1]).containsExactly("44D126", "Motor B")
+    }
+
+    @Test
+    fun `re-uploading the same catalog reuses cached chunks without calling the llm`() {
+        every { llmService.parseCatalogChunk(any(), any(), any()) } answers { ok(productFor(firstArg())) }
+        service().runIngest(ingest, fourPages, "upload")
+        verify(exactly = 4) { llmService.parseCatalogChunk(any(), any(), any()) }
+        savedProducts.clear()
+        savedIngests.clear()
+
+        service().runIngest(ingest, fourPages, "upload")
+
+        verify(exactly = 4) { llmService.parseCatalogChunk(any(), any(), any()) } // no new calls
+        assertThat(savedProducts.map { it.mpn }).containsExactly("GD-1", "GD-2", "GD-3", "GD-4")
+        assertThat(savedIngests.last().stepLog).contains("Chunk 1/4: 1 product(s) (from cache)")
+    }
+
+    @Test
+    fun `cache is keyed by model so switching models extracts again`() {
+        every { llmService.parseCatalogChunk(any(), any(), any()) } answers { ok(productFor(firstArg())) }
+        service(model = "model-a").runIngest(ingest, fourPages, "upload")
+
+        service(model = "model-b").runIngest(ingest, fourPages, "upload")
+
+        verify(exactly = 8) { llmService.parseCatalogChunk(any(), any(), any()) }
+        assertThat(chunkCache).hasSize(8)
+    }
+
+    @Test
+    fun `a chunk still cut off is not cached`() {
+        every { llmService.parseCatalogChunk(any(), any(), any()) } answers {
+            CatalogBatchResult(rowsIn(firstArg()).take(2), truncated = true)
+        }
+
+        service(chunkChars = 500).runIngest(ingest, denseTable, "upload")
+
+        assertThat(chunkCache).isEmpty()
+    }
+
+    @Test
+    fun `cached products keep their specs`() {
+        every { llmService.parseCatalogChunk(any(), any(), any()) } answers { ok(productFor(firstArg())) }
+        service().runIngest(ingest, fourPages, "upload")
+        savedProducts.clear()
+
+        service().runIngest(ingest, fourPages, "upload")
+
+        assertThat(savedProducts.first { it.mpn == "GD-3" }.attributes).contains("\"range_ppm\":3.0")
     }
 }

@@ -100,6 +100,31 @@ class LlmServiceTest {
     }
 
     @Test
+    fun `catalog prompt keeps output short - no descriptions and no null fields`() {
+        val client = RecordingClient("""{"products":[]}""")
+        LlmService(client).parseCatalogChunk("page text", emptyList())
+
+        val prompt = client.systemPrompt
+        assertThat(prompt).doesNotContain("\"description\": a short")
+        assertThat(prompt).contains("Do not write descriptions or summaries")
+        assertThat(prompt).contains("Omit any key whose value is not printed")
+    }
+
+    @Test
+    fun `catalog parsing accepts products with omitted optional fields`() {
+        val client = RecordingClient("""{"products":[{"className":"AC Motor","name":"Dayton 1K065"}]}""")
+
+        val res = LlmService(client).parseCatalogChunk("page text", emptyList())
+
+        assertThat(res.products).hasSize(1)
+        val p = res.products[0]
+        assertThat(p.mpn).isNull()
+        assertThat(p.price).isNull()
+        assertThat(p.currency).isEqualTo("JOD")
+        assertThat(p.attributes).isEmpty()
+    }
+
+    @Test
     fun `catalog chunk reports truncation from the provider`() {
         val client = TruncatingClient("""{"products":[{"className":"AC Motor","name":"A","mpn":"A1","attributes":{}}]}""", truncated = true)
 

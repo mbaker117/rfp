@@ -179,6 +179,28 @@ class AttributeMergeTest {
     }
 
     @Test
+    fun `accessory columns on stored products are split and the old def is removed`() {
+        products += product("""{"capacitor_req":"Included","power_hp":1}""")
+        products += product("""{"capacitor_req":"2MDV6","power_hp":2}""")
+        products += product("""{"power_hp":3}""")
+        defs += def("capacitor_req"); defs += def("power_hp", "numeric")
+
+        assertThat(service().normalizeAccessorySpecs(10L)).isEqualTo(2)
+
+        assertThat(products.map { attrsOf(it) }).containsExactly(
+            mapOf("capacitor_included" to true, "power_hp" to 1),
+            mapOf("capacitor_item_no" to "2MDV6", "capacitor_included" to false, "power_hp" to 2),
+            mapOf("power_hp" to 3)
+        )
+        assertThat(defs.map { it.name }).containsExactly("power_hp")
+
+        // A def left behind by an earlier pass is removed even when no product needs rewriting.
+        defs += def("capacitor_required")
+        assertThat(service().normalizeAccessorySpecs(10L)).isEqualTo(0)
+        assertThat(defs.map { it.name }).containsExactly("power_hp")
+    }
+
+    @Test
     fun `merging repeats until a pass finds nothing new`() {
         products += product("""{"phase":"1","motor_type":"PSC","power_hp":1}""")
         products += product("""{"phases":3,"motor_subtype":"Split-Phase","power_hp":2}""")

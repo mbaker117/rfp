@@ -2,8 +2,14 @@ package com.rfp.service
 
 import com.fasterxml.jackson.databind.ObjectMapper
 
+/** [truncated] is true when the provider stopped because it hit the output token limit. */
+data class LlmResponse(val text: String, val truncated: Boolean)
+
 interface LlmClient {
     fun call(systemPrompt: String, userMessage: String): String
+
+    fun callDetailed(systemPrompt: String, userMessage: String): LlmResponse =
+        LlmResponse(call(systemPrompt, userMessage), truncated = false)
 }
 
 private const val MAX_ERROR_DETAIL_CHARS = 300

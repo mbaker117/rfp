@@ -11,13 +11,11 @@ class LlmServiceTest {
 
     @Test
     fun `parseCatalogBatch returns parsed products`() {
-        val llmClient = mockk<LlmClient>()
-        val service = LlmService(llmClient)
-        every { llmClient.call(any(), any()) } returns """
+        val service = LlmService(RecordingClient("""
             {"products":[{"className":"Multimeter","name":"Fluke 179","mpn":"FL179",
               "price":320.0,"currency":"JOD","attributes":{"description":"Portable true-RMS multimeter.",
               "manualLink":"https://example.com/manual.pdf","max_voltage":1000,"has_trms":true}}]}
-        """.trimIndent()
+        """.trimIndent()))
 
         val result = service.parseCatalogBatch("raw text", emptyList())
         assertThat(result).hasSize(1)
@@ -27,6 +25,166 @@ class LlmServiceTest {
             .isEqualTo("Portable true-RMS multimeter.")
         assertThat(result[0].attributes["manualLink"])
             .isEqualTo("https://example.com/manual.pdf")
+    }
+
+    @Test
+    fun `catalog prompt only extracts purchasable items and applies table headings to rows`() {
+        val client = RecordingClient("""{"products":[]}""")
+        LlmService(client).parseCatalogBatch("page text", emptyList())
+
+        val prompt = client.systemPrompt
+        assertThat(prompt).contains("purchasable")
+        assertThat(prompt).contains("part number, model number, or the supplier's item/SKU number")
+        assertThat(prompt).contains("selection guides").contains("dimension charts").contains("definitions")
+        assertThat(prompt).contains("table title, column group heading or section heading")
+        assertThat(prompt).contains("\"item_no\"")
+        assertThat(prompt).contains("ISO 4217")
+        assertThat(prompt).contains("untrusted data")
+    }
+
+    @Test
+    fun `catalog prompt reuses existing class keys and forbids forcing products into unrelated classes`() {
+        val client = RecordingClient("""{"products":[]}""")
+        val classes = listOf(ClassSchema("AC Motor", listOf(AttrSchema("hp", "numeric", "hp"), AttrSchema("frame", "text", null))))
+        LlmService(client).parseCatalogBatch("page text", classes)
+
+        val prompt = client.systemPrompt
+        assertThat(prompt).contains("AC Motor: hp(numeric, unit=hp), frame(text)")
+        assertThat(prompt).contains("Reuse an existing class only when the item is genuinely that kind of product")
+        assertThat(prompt).contains("use that class's attribute keys exactly")
+        assertThat(prompt).contains("specific product type")
+    }
+
+    @Test
+    fun `catalog price and currency parsing tolerates formatting and nulls`() {
+        val client = RecordingClient("""
+            {"products":[
+              {"className":"AC Motor","name":"A","mpn":"A1","price":"1,234.50","currency":"USD","attributes":{}},
+              {"className":"AC Motor","name":"B","mpn":"B1","price":null,"currency":null,"attributes":{}},
+              {"className":"AC Motor","name":"C","mpn":"C1","price":"call for price","attributes":{}}
+            ]}
+        """.trimIndent())
+
+        val result = LlmService(client).parseCatalogBatch("page text", emptyList())
+
+        assertThat(result.map { it.name }).containsExactly("A", "B", "C")
+        assertThat(result[0].price).isEqualByComparingTo("1234.50")
+        assertThat(result[0].currency).isEqualTo("USD")
+        assertThat(result[1].price).isNull()
+        assertThat(result[1].currency).isEqualTo("JOD")
+        assertThat(result[2].price).isNull()
+    }
+
+    @Test
+    fun `catalog prompt splits repeated column groups into one product per item number`() {
+        val client = RecordingClient("""{"products":[]}""")
+        LlmService(client).parseCatalogChunk("page text", emptyList())
+
+        val prompt = client.systemPrompt
+        assertThat(prompt).contains("repeating column groups")
+        assertThat(prompt).contains("one product per item number")
+        assertThat(prompt).contains("Every item number printed in the text belongs to a product")
+        assertThat(prompt).contains("Use one key per spec")
+        assertThat(prompt).contains("never repeat a unit inside a value")
+        assertThat(prompt).doesNotContain("ALREADY EXTRACTED")
+    }
+
+    @Test
+    fun `continuation call lists the identifiers already extracted`() {
+        val client = RecordingClient("""{"products":[]}""")
+        LlmService(client).parseCatalogChunk("page text", emptyList(), alreadyExtracted = listOf("1K065", "6K483"))
+
+        assertThat(client.systemPrompt).contains("ALREADY EXTRACTED").contains("1K065, 6K483")
+        assertThat(client.systemPrompt).contains("Do not repeat them")
+        assertThat(client.userMessage).isEqualTo("page text")
+    }
+
+    @Test
+    fun `catalog prompt keeps output short - no descriptions and no null fields`() {
+        val client = RecordingClient("""{"products":[]}""")
+        LlmService(client).parseCatalogChunk("page text", emptyList())
+
+        val prompt = client.systemPrompt
+        assertThat(prompt).doesNotContain("\"description\": a short")
+        assertThat(prompt).contains("Do not write descriptions or summaries")
+        assertThat(prompt).contains("Omit any key whose value is not printed")
+    }
+
+    @Test
+    fun `catalog parsing accepts products with omitted optional fields`() {
+        val client = RecordingClient("""{"products":[{"className":"AC Motor","name":"Dayton 1K065"}]}""")
+
+        val res = LlmService(client).parseCatalogChunk("page text", emptyList())
+
+        assertThat(res.products).hasSize(1)
+        val p = res.products[0]
+        assertThat(p.mpn).isNull()
+        assertThat(p.price).isNull()
+        assertThat(p.currency).isEqualTo("JOD")
+        assertThat(p.attributes).isEmpty()
+    }
+
+    @Test
+    fun `catalog prompt keeps other item numbers in a row out of item_no`() {
+        val client = RecordingClient("""{"products":[]}""")
+        LlmService(client).parseCatalogChunk("page text", emptyList())
+
+        assertThat(client.systemPrompt).contains("the row's own item/SKU number")
+        assertThat(client.systemPrompt).contains("\"capacitor_item_no\"")
+        assertThat(client.systemPrompt).contains("never in \"item_no\"")
+    }
+
+    @Test
+    fun `catalog answer with prose before the json is still parsed`() {
+        val client = RecordingClient("""
+            I need to extract products not already in the "ALREADY EXTRACTED" list. Let me identify the remaining products.
+
+            {"products":[{"className":"AC Motor","name":"Dayton 6K342","mpn":"6K342","attributes":{"item_no":"6K342"}}]}
+        """.trimIndent())
+
+        val res = LlmService(client).parseCatalogChunk("page text", emptyList(), alreadyExtracted = listOf("1K077"))
+
+        assertThat(res.products.map { it.mpn }).containsExactly("6K342")
+        assertThat(res.truncated).isFalse()
+    }
+
+    @Test
+    fun `continuation prompt ends by asking for the json object only`() {
+        val client = RecordingClient("""{"products":[]}""")
+        LlmService(client).parseCatalogChunk("page text", emptyList(), alreadyExtracted = listOf("1K077"))
+
+        assertThat(client.systemPrompt.trimEnd()).endsWith("""Respond with the JSON object only, starting with {"products".""")
+    }
+
+    @Test
+    fun `catalog chunk reports truncation from the provider`() {
+        val client = TruncatingClient("""{"products":[{"className":"AC Motor","name":"A","mpn":"A1","attributes":{}}]}""", truncated = true)
+
+        val res = LlmService(client).parseCatalogChunk("page text", emptyList())
+
+        assertThat(res.truncated).isTrue()
+        assertThat(res.products.map { it.name }).containsExactly("A")
+    }
+
+    @Test
+    fun `catalog chunk whose json had to be repaired counts as truncated`() {
+        val cutOff = """{"products":[{"className":"AC Motor","name":"A","mpn":"A1","attributes":{}},{"className":"AC Mo"""
+        val res = LlmService(TruncatingClient(cutOff, truncated = false)).parseCatalogChunk("page text", emptyList())
+
+        assertThat(res.truncated).isTrue()
+        assertThat(res.products.map { it.name }).containsExactly("A")
+    }
+
+    @Test
+    fun `complete catalog chunk is not truncated`() {
+        val res = LlmService(TruncatingClient("""{"products":[]}""", truncated = false)).parseCatalogChunk("page text", emptyList())
+
+        assertThat(res.truncated).isFalse()
+    }
+
+    private class TruncatingClient(private val text: String, private val truncated: Boolean) : LlmClient {
+        override fun call(systemPrompt: String, userMessage: String) = text
+        override fun callDetailed(systemPrompt: String, userMessage: String) = LlmResponse(text, truncated)
     }
 
     @Test

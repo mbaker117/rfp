@@ -15,22 +15,27 @@ import org.springframework.stereotype.Service
 class AnthropicLlmClient(
     @Value("\${rfp.llm.api-key}") val apiKey: String,
     @Value("\${rfp.llm.model}") val model: String,
-    @Value("\${rfp.llm.base-url:https://api.anthropic.com/v1/}") val baseUrl: String = "https://api.anthropic.com/v1/"
+    @Value("\${rfp.llm.base-url:https://api.anthropic.com/v1/}") val baseUrl: String = "https://api.anthropic.com/v1/",
+    @Value("\${rfp.llm.max-tokens:16000}") val maxTokens: Int = 16000
 ) : LlmClient {
 
+    // Non-streaming: nothing arrives until the whole answer is generated, so the read timeout
+    // must cover a full max-tokens response.
     private val client = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(120, TimeUnit.SECONDS)
+        .readTimeout(600, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
         .build()
     private val mapper = ObjectMapper()
 
     private val effectiveBaseUrl = baseUrl.ifBlank { "https://api.anthropic.com/v1/" }
 
-    override fun call(systemPrompt: String, userMessage: String): String {
+    override fun call(systemPrompt: String, userMessage: String): String = callDetailed(systemPrompt, userMessage).text
+
+    override fun callDetailed(systemPrompt: String, userMessage: String): LlmResponse {
         val body = mapper.writeValueAsString(mapOf(
             "model" to model,
-            "max_tokens" to 8192,
+            "max_tokens" to maxTokens,
             "temperature" to 0,
             "system" to systemPrompt,
             "messages" to listOf(mapOf("role" to "user", "content" to userMessage))
@@ -44,8 +49,9 @@ class AnthropicLlmClient(
         return client.newCall(request).execute().use { response ->
             if (!response.isSuccessful) throw llmHttpError(response.code, response.body?.string(), mapper)
             val json = mapper.readTree(response.body!!.string())
-            json["content"]?.get(0)?.get("text")?.asText()
+            val text = json["content"]?.get(0)?.get("text")?.asText()
                 ?: throw LlmException("Empty LLM response")
+            LlmResponse(text, truncated = json["stop_reason"]?.asText() == "max_tokens")
         }
     }
 }

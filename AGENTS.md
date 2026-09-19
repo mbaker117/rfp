@@ -76,7 +76,7 @@ Browser → Next.js (3000) → Spring Boot (8080) → PostgreSQL (5432)
 
 **A. Catalog ingestion → `product` rows** (per supplier)
 
-1. *File upload* — `POST /suppliers/{id}/catalog/upload` → `CatalogIngestService.ingestFile` (`@Async`) → `DocumentParsingService` → `LlmService.parseCatalogBatch` → `UnitNormalizationService` → upsert `product` + `product_price` (+ `product_price_history` on price change). Products from this supplier not seen in the run are marked `is_stale`, **except** crawler-discovered ones (`canonicalSourceUrl != null`).
+1. *File upload* — `POST /suppliers/{id}/catalog/upload` → `CatalogIngestService.ingestFile` (`@Async`) → `DocumentParsingService` (each PDF page ends with a form feed) → `CatalogChunker` splits the text into `rfp.catalog.chunk-chars` chunks → `LlmService.parseCatalogBatch` per chunk (`rfp.catalog.parallelism` concurrent calls, capped at `rfp.catalog.max-chunks`) → `UnitNormalizationService` → upsert `product` + `product_price` (+ `product_price_history` on price change) matched by `attributes.item_no`, then `mpn`, and by name only when a product has neither (catalog names are generic), saved in document order with per-chunk progress in `catalog_ingest.step_log`. A chunk whose answer hits the output limit (`rfp.llm.max-tokens`; `LlmClient.callDetailed` reports the provider stop reason) is continued: the same whole chunk is sent again with the item numbers already extracted, up to 8 calls, so table headings stay in view. Complete chunk results are cached in `catalog_chunk_cache` (key: `sha256(CATALOG_PROMPT_VERSION | model | chunk text)`), so re-uploading a catalog skips unchanged chunks — bump `CATALOG_PROMPT_VERSION` in `LlmService.kt` whenever the catalog prompt changes. A failed chunk is skipped; a 400/401/403 LLM error or 3 consecutive failures stop the run. Only a complete, failure-free run marks this supplier's unseen products `is_stale`, **except** crawler-discovered ones (`canonicalSourceUrl != null`).
 2. *Website crawl* — `POST /suppliers/{id}/catalog/scrape` → `CrawlCoordinator.enqueue` when the supplier has an `officialWebsite`, else the legacy `ScrapeService` path.
 
 **B. Tender processing → report + proposals**
@@ -142,7 +142,7 @@ Stateless JWT (jjwt), BCrypt hashes, `app_user` table. `JwtUtil.generateToken(us
 
 ### Database
 
-Flyway owns the schema (`ddl-auto: validate`) — every column change needs a new `V{N}__description.sql`. V1/V2 created the original `company`/`instrument` tables; **V3 (`specta_schema`) introduced the current model** and V8–V10 added the crawl tables and product identity key. JSON attribute bags (`product.attributes`, `tender_line.attributes`) are `jsonb` columns mapped as `String` with `@JdbcTypeCode(SqlTypes.JSON)`.
+Flyway owns the schema (`ddl-auto: validate`) — every column change needs a new `V{N}__description.sql`. V1/V2 created the original `company`/`instrument` tables; **V3 (`specta_schema`) introduced the current model** and V8–V10 added the crawl tables and product identity key, V11 the catalog chunk cache, and V12 an index for item-number matching. JSON attribute bags (`product.attributes`, `tender_line.attributes`) are `jsonb` columns mapped as `String` with `@JdbcTypeCode(SqlTypes.JSON)`.
 
 ### Frontend
 

@@ -30,6 +30,54 @@ class LlmServiceTest {
     }
 
     @Test
+    fun `catalog prompt only extracts purchasable items and applies table headings to rows`() {
+        val client = RecordingClient("""{"products":[]}""")
+        LlmService(client).parseCatalogBatch("page text", emptyList())
+
+        val prompt = client.systemPrompt
+        assertThat(prompt).contains("purchasable")
+        assertThat(prompt).contains("part number, model number, or the supplier's item/SKU number")
+        assertThat(prompt).contains("selection guides").contains("dimension charts").contains("definitions")
+        assertThat(prompt).contains("table title, column group heading or section heading")
+        assertThat(prompt).contains("\"item_no\"")
+        assertThat(prompt).contains("ISO 4217")
+        assertThat(prompt).contains("untrusted data")
+    }
+
+    @Test
+    fun `catalog prompt reuses existing class keys and forbids forcing products into unrelated classes`() {
+        val client = RecordingClient("""{"products":[]}""")
+        val classes = listOf(ClassSchema("AC Motor", listOf(AttrSchema("hp", "numeric", "hp"), AttrSchema("frame", "text", null))))
+        LlmService(client).parseCatalogBatch("page text", classes)
+
+        val prompt = client.systemPrompt
+        assertThat(prompt).contains("AC Motor: hp(numeric, unit=hp), frame(text)")
+        assertThat(prompt).contains("Reuse an existing class only when the item is genuinely that kind of product")
+        assertThat(prompt).contains("use that class's attribute keys exactly")
+        assertThat(prompt).contains("specific product type")
+    }
+
+    @Test
+    fun `catalog price and currency parsing tolerates formatting and nulls`() {
+        val client = RecordingClient("""
+            {"products":[
+              {"className":"AC Motor","name":"A","mpn":"A1","price":"1,234.50","currency":"USD","attributes":{}},
+              {"className":"AC Motor","name":"B","mpn":"B1","price":null,"currency":null,"attributes":{}},
+              {"className":"AC Motor","name":"C","mpn":"C1","price":"call for price","attributes":{}}
+            ]}
+        """.trimIndent())
+
+        val result = LlmService(client).parseCatalogBatch("page text", emptyList())
+
+        assertThat(result.map { it.name }).containsExactly("A", "B", "C")
+        assertThat(result[0].price).isEqualByComparingTo("1234.50")
+        assertThat(result[0].currency).isEqualTo("USD")
+        assertThat(result[1].price).isNull()
+        assertThat(result[1].currency).isEqualTo("JOD")
+        assertThat(result[2].price).isNull()
+    }
+
+    @Test
     fun `defineClass returns attribute defs with match ops`() {
         val llmClient = mockk<LlmClient>()
         val service = LlmService(llmClient)

@@ -448,6 +448,33 @@ class LlmService(
             }
     }
 
+    // Task 2d: spec keys of one class that are the same spec under different names ("phase" / "phases").
+    // Code vetoes any group whose keys disagree on the same products (AttributeSchemaService.mergeDuplicates).
+    fun findDuplicateAttributes(className: String, attributes: List<AttributeUsage>): List<DuplicateGroup> {
+        val system = """
+            These spec keys were extracted from catalog pages for products of the class "$className". Different pages
+            sometimes named the same spec differently. Group keys that mean EXACTLY the same spec of the product
+            (e.g. "phase" and "phases", "motor_eff_group" and "motor_efficiency_group"). Never group related but
+            different specs (shaft diameter vs body diameter, min vs max, input vs output). When unsure, do not group.
+            For each group pick the canonical key (prefer the most used), list the other keys as aliases, and give a
+            valueMap translating value spellings to the canonical form only where values mean the same thing
+            (e.g. {"Single":"1","Three":"3"} when the canonical values are numbers). Omit valueMap when not needed.
+            Respond ONLY with valid JSON: {"groups":[{"canonical":string,"aliases":[string],"valueMap":{string:string}}]}
+            Return {"groups":[]} when there are no duplicates.
+        """.trimIndent()
+        val user = attributes.joinToString("\n") { a -> "${a.name} (${a.products} products): ${a.samples.joinToString(" | ")}" }
+        val known = attributes.map { it.name }.toSet()
+        val json = parseJson(call(system, user))
+        return (json["groups"] ?: throw LlmException("LLM response missing 'groups' key")).mapNotNull { g ->
+            val canonical = g["canonical"]?.asText()?.takeIf { it in known } ?: return@mapNotNull null
+            val aliases = g["aliases"]?.map { it.asText() }?.filter { it in known && it != canonical }?.distinct().orEmpty()
+            if (aliases.isEmpty()) return@mapNotNull null
+            val valueMap = g["valueMap"]?.takeIf { it.isObject }?.fields()?.asSequence()
+                ?.associate { (k, v) -> k to v.asText() }.orEmpty()
+            DuplicateGroup(canonical, aliases, valueMap)
+        }
+    }
+
     // Task 2b: given navigation links extracted from homepage, find product catalog URLs
     fun identifyProductUrls(baseUrl: String, navigationLinks: String): List<String> {
         val system = """

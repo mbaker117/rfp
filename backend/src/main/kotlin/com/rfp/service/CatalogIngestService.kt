@@ -139,8 +139,9 @@ open class CatalogIngestService(
             // Never fail an import over its class schemas; the admin endpoint can re-run the sync.
             try {
                 val r = schema.syncClasses(touchedClassIds)
-                if (r.added + r.fixed + r.removed > 0)
-                    log("Attribute definitions: ${r.added} added, ${r.fixed} corrected, ${r.removed} identifier(s) removed")
+                if (r.added + r.fixed + r.removed + r.merged > 0)
+                    log("Attribute definitions: ${r.added} added, ${r.fixed} corrected, ${r.removed} identifier(s) removed" +
+                        if (r.merged > 0) ", ${r.merged} duplicate spec name(s) merged" else "")
             } catch (e: Exception) {
                 log("Attribute definitions were not updated: ${e.message}")
             }
@@ -253,7 +254,8 @@ open class CatalogIngestService(
             touchedClassIds += productClass.id
 
             val defs = attrDefRepo.findByProductClassId(productClass.id)
-            val normalizedAttrs = unitService.normalizeAttributes(p.attributes, defs)
+            val canonicalAttrs = schemaService?.canonicalize(productClass.id, p.attributes) ?: p.attributes
+            val normalizedAttrs = unitService.normalizeAttributes(canonicalAttrs, defs)
             val attrsJson = mapper.writeValueAsString(normalizedAttrs)
 
             val existing = findExisting(p, supplier.id)

@@ -144,6 +144,25 @@ class LlmServiceTest {
     }
 
     @Test
+    fun `findValueSynonyms keeps only mappings between values the spec has`() {
+        val client = RecordingClient("""
+            {"specs":[
+              {"name":"motor_type","map":{"PSC":"Permanent Split Capacitor","Invented":"PSC","Split-Phase":"Split-Phase"}},
+              {"name":"ghost","map":{"a":"b"}},
+              {"name":"enclosure","map":{}}
+            ]}
+        """.trimIndent())
+
+        val maps = LlmService(client).findValueSynonyms("AC Motor", listOf(
+            ValueUsage("motor_type", mapOf("Permanent Split Capacitor" to 211, "PSC" to 5, "Split-Phase" to 36)),
+            ValueUsage("enclosure", mapOf("TEFC" to 10, "ODP" to 4))
+        ))
+
+        assertThat(maps).isEqualTo(mapOf("motor_type" to mapOf("PSC" to "Permanent Split Capacitor")))
+        assertThat(client.userMessage).contains("motor_type: Permanent Split Capacitor (211) | PSC (5) | Split-Phase (36)")
+    }
+
+    @Test
     fun `defineAttributes returns labels and match rules only for the requested keys`() {
         val client = RecordingClient("""
             {"attributes":[

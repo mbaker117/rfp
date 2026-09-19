@@ -7,6 +7,7 @@ import com.rfp.domain.AttributeDef
 import com.rfp.dto.AttributeMeta
 import com.rfp.dto.AttributeSample
 import com.rfp.dto.AttributeUsage
+import com.rfp.dto.ValueUsage
 import com.rfp.repository.AttributeAliasRepository
 import com.rfp.repository.AttributeDefRepository
 import com.rfp.repository.ProductClassRepository
@@ -36,26 +37,31 @@ class AttributeSchemaService(
     private val llmService: LlmService,
     private val aliasRepo: AttributeAliasRepository? = null
 ) {
-    data class SyncResult(val added: Int = 0, val fixed: Int = 0, val removed: Int = 0, val merged: Int = 0) {
+    data class SyncResult(
+        val added: Int = 0, val fixed: Int = 0, val removed: Int = 0, val merged: Int = 0, val values: Int = 0
+    ) {
         operator fun plus(o: SyncResult) =
-            SyncResult(added + o.added, fixed + o.fixed, removed + o.removed, merged + o.merged)
+            SyncResult(added + o.added, fixed + o.fixed, removed + o.removed, merged + o.merged, values + o.values)
     }
 
     private val log = LoggerFactory.getLogger(javaClass)
     private val mapper = ObjectMapper().apply { findAndRegisterModules() }
 
-    /** Admin action: sync every class and look for duplicate spec names in each (one LLM call per class). */
+    /** Admin action: sync every class and look for duplicate spec names and value spellings in each. */
     fun syncAll(): SyncResult = syncClasses(productClassRepo.findAll().map { it.id }, alwaysMerge = true)
 
     /**
      * After an import: sync the touched classes, and look for duplicate spec names only in classes that just
-     * gained definitions (a new name is when a duplicate can appear), then sync those again.
+     * gained definitions (a new name is when a duplicate can appear). Value spellings are checked in every touched
+     * class, since any import can bring a new spelling. Classes that changed are synced again.
      */
     fun syncClasses(classIds: Collection<Long>, alwaysMerge: Boolean = false): SyncResult =
         classIds.distinct().fold(SyncResult()) { acc, id ->
             val synced = syncClass(id)
             val merged = if (alwaysMerge || synced.added > 0) mergeUntilStable(id) else 0
-            acc + synced + (if (merged > 0) syncClass(id) else SyncResult()) + SyncResult(merged = merged)
+            val values = mergeValueSpellings(id)
+            val resynced = if (merged + values > 0) syncClass(id) else SyncResult()
+            acc + synced + resynced + SyncResult(merged = merged, values = values)
         }
 
     /** The LLM can miss a group in one pass; repeat until a pass merges nothing (at most [MAX_MERGE_PASSES]). */
@@ -141,6 +147,75 @@ class AttributeSchemaService(
         }
         return merged
     }
+
+    /**
+     * Rewrites spellings of one value within a text spec ("PSC" -> "Permanent Split Capacitor") to one canonical
+     * spelling and records them in the def's valueAliases for [canonicalize]. The LLM proposes the mappings from the
+     * spec's values; code keeps only mappings between values the spec actually has, rejects two different numbers
+     * and follows chains to a final value. Specs with more than [MAX_SPELLING_VALUES] values (frames, ratios) are
+     * codes rather than words and are skipped. Returns the number of values mapped.
+     */
+    fun mergeValueSpellings(classId: Long): Int {
+        val productClass = productClassRepo.findById(classId).orElse(null) ?: return 0
+        val defs = attrDefRepo.findByProductClassId(classId)
+            .filter { it.datatype in setOf("text", "enum") && !isIdentifier(it.name) }
+        if (defs.isEmpty()) return 0
+        val products = productRepo.findByProductClassId(classId)
+        val working = products.associate { p -> p.id to readAttributes(p.attributes).toMutableMap() }
+
+        val specs = defs.mapNotNull { d ->
+            val counts = working.values.mapNotNull { a -> a[d.name]?.toString()?.trim()?.takeIf { it.isNotEmpty() } }
+                .groupingBy { it }.eachCount()
+            if (counts.size < 2 || counts.size > MAX_SPELLING_VALUES) null
+            else ValueUsage(d.name, counts.entries.sortedByDescending { it.value }.associate { it.key to it.value })
+        }
+        if (specs.isEmpty()) return 0
+        val proposed = try {
+            llmService.findValueSynonyms(productClass.name, specs)
+        } catch (e: Exception) {
+            log.warn("Value spelling detection for class '{}' failed: {}", productClass.name, e.message)
+            return 0
+        }
+
+        val defsByName = defs.associateBy { it.name }
+        val changed = mutableSetOf<Long>()
+        var mapped = 0
+        proposed.forEach { (key, raw) ->
+            val def = defsByName[key] ?: return@forEach
+            val map = resolveSpellings(raw)
+            if (map.isEmpty()) return@forEach
+            val lookup = map.mapKeys { it.key.lowercase() }
+            working.forEach { (id, a) ->
+                val v = a[key] ?: return@forEach
+                lookup[v.toString().trim().lowercase()]?.let { a[key] = it; changed += id }
+            }
+            attrDefRepo.save(def.copy(valueAliases = mapper.writeValueAsString(readStringMap(def.valueAliases) + map)))
+            log.info("Class '{}', spec '{}': merged value spellings {}", productClass.name, key, map)
+            mapped += map.size
+        }
+        if (changed.isNotEmpty()) {
+            productRepo.saveAll(products.filter { it.id in changed }.map {
+                it.copy(attributes = mapper.writeValueAsString(working[it.id]), updatedAt = Instant.now())
+            })
+        }
+        return mapped
+    }
+
+    /** Follows variant -> canonical chains to a value that is not itself a variant; drops cycles and number clashes. */
+    private fun resolveSpellings(raw: Map<String, String>): Map<String, String> =
+        raw.mapNotNull { (variant, first) ->
+            var target = first
+            val seen = mutableSetOf(variant)
+            while (target in raw) {
+                if (!seen.add(target)) return@mapNotNull null
+                target = raw.getValue(target)
+            }
+            val nv = SpecNumbers.parse(variant)
+            val nt = SpecNumbers.parse(target)
+            if (nv != null && nt != null && abs(nv - nt) >= 1e-9) null
+            else if (variant.equals(target, ignoreCase = true)) null
+            else variant to target
+        }.toMap()
 
     /** Translates alias keys and value spellings to the class's canonical form (new products and tender lines). */
     fun canonicalize(classId: Long, attributes: Map<String, Any>): Map<String, Any> {
@@ -251,6 +326,7 @@ class AttributeSchemaService(
         const val NUMERIC_SHARE = 0.9
         const val SAMPLES_PER_KEY = 5
         const val MAX_MERGE_PASSES = 3
+        const val MAX_SPELLING_VALUES = 40
         val IDENTIFIER_KEYS = setOf("item_no", "mpn", "manualLink", "description", "sku")
         /** Key suffix -> canonical unit, using the unit_conversion table's symbols where it has them. */
         val UNIT_SUFFIXES = linkedMapOf(

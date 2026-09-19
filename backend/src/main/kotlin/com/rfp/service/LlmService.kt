@@ -475,6 +475,36 @@ class LlmService(
         }
     }
 
+    // Task 2e: spellings of one value within a text spec ("PSC" / "Permanent Split Capacitor").
+    // Returns spec key -> (variant -> canonical value); only values that were sent are kept.
+    fun findValueSynonyms(className: String, specs: List<ValueUsage>): Map<String, Map<String, String>> {
+        val system = """
+            Each line is a text spec of products of the class "$className", followed by its values and how many
+            products carry each value. Different catalog pages sometimes spelled the same value differently.
+            For each spec, map values that mean EXACTLY the same thing to one canonical spelling taken from that
+            spec's values (prefer the most used), e.g. "PSC" -> "Permanent Split Capacitor", "3-Phase" -> "Three-Phase".
+            Never map values that differ in size, rating, model, variant or suffix ("56" vs "56J", "TEFC" vs "TENV",
+            "Capacitor-Start" vs "Capacitor-Start/Run"), and never map a value to one that says more about the product
+            ("Ball" vs "Ball, permanently lubricated"). Case alone does not matter. When unsure, do not map.
+            Respond ONLY with valid JSON: {"specs":[{"name":string,"map":{"variant":"canonical"}}]}
+            Return {"specs":[]} when nothing needs mapping.
+        """.trimIndent()
+        val user = specs.joinToString("\n") { s ->
+            "${s.name}: " + s.values.entries.joinToString(" | ") { "${it.key} (${it.value})" }
+        }
+        val valuesByName = specs.associate { s -> s.name to s.values.keys }
+        val json = parseJson(call(system, user))
+        return (json["specs"] ?: throw LlmException("LLM response missing 'specs' key")).mapNotNull { s ->
+            val name = s["name"]?.asText() ?: return@mapNotNull null
+            val values = valuesByName[name] ?: return@mapNotNull null
+            val map = s["map"]?.takeIf { it.isObject }?.fields()?.asSequence()
+                ?.map { (k, v) -> k to v.asText() }
+                ?.filter { (k, v) -> k in values && v in values && k != v }
+                ?.toMap().orEmpty()
+            if (map.isEmpty()) null else name to map
+        }.toMap()
+    }
+
     // Task 2b: given navigation links extracted from homepage, find product catalog URLs
     fun identifyProductUrls(baseUrl: String, navigationLinks: String): List<String> {
         val system = """

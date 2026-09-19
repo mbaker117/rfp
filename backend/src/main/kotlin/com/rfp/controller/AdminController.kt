@@ -43,7 +43,7 @@ class AdminController(
     @PostMapping("/product-classes/sync-attributes")
     fun syncAttributeDefinitions(): Map<String, Int> {
         val r = attributeSchemaService.syncAll()
-        return mapOf("added" to r.added, "corrected" to r.fixed, "removed" to r.removed, "merged" to r.merged)
+        return mapOf("added" to r.added, "corrected" to r.fixed, "removed" to r.removed, "merged" to r.merged, "values" to r.values)
     }
 
     @PostMapping("/refresh")

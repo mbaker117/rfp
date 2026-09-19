@@ -132,6 +132,53 @@ class AttributeMergeTest {
     }
 
     @Test
+    fun `value spellings are rewritten to the canonical spelling and recorded for canonicalize`() {
+        repeat(4) { products += product("""{"motor_type":"Permanent Split Capacitor"}""") }
+        products += product("""{"motor_type":"PSC"}""")
+        products += product("""{"motor_type":"3-Phase"}""")
+        products += product("""{"motor_type":"Three-Phase"}""")
+        defs += def("motor_type")
+        every { llmService.findValueSynonyms("AC Motor", any()) } returns
+            mapOf("motor_type" to mapOf("PSC" to "Permanent Split Capacitor", "3-Phase" to "Three-Phase"))
+
+        assertThat(service().mergeValueSpellings(10L)).isEqualTo(2)
+
+        assertThat(products.map { attrsOf(it)["motor_type"] }.distinct())
+            .containsExactlyInAnyOrder("Permanent Split Capacitor", "Three-Phase")
+        assertThat(service().canonicalize(10L, mapOf("motor_type" to "psc")))
+            .isEqualTo(mapOf("motor_type" to "Permanent Split Capacitor"))
+    }
+
+    @Test
+    fun `value spellings sends counts, follows chains and rejects different numbers`() {
+        products += product("""{"enclosure":"TEFC","voltage":"115"}""")
+        products += product("""{"enclosure":"Totally Enclosed Fan Cooled","voltage":"230"}""")
+        products += product("""{"enclosure":"Tot. Encl. Fan Cooled","voltage":"115"}""")
+        defs += def("enclosure"); defs += def("voltage"); defs += def("power_hp", "numeric")
+        val sent = slot<List<ValueUsage>>()
+        every { llmService.findValueSynonyms(any(), capture(sent)) } returns mapOf(
+            "enclosure" to mapOf("Tot. Encl. Fan Cooled" to "TEFC", "TEFC" to "Totally Enclosed Fan Cooled"),
+            "voltage" to mapOf("115" to "230")
+        )
+
+        assertThat(service().mergeValueSpellings(10L)).isEqualTo(2)
+
+        assertThat(sent.captured.map { it.name }).containsExactlyInAnyOrder("enclosure", "voltage")
+        assertThat(sent.captured.single { it.name == "voltage" }.values).isEqualTo(mapOf("115" to 2, "230" to 1))
+        assertThat(products.map { attrsOf(it)["enclosure"] }.distinct()).containsExactly("Totally Enclosed Fan Cooled")
+        assertThat(products.map { attrsOf(it)["voltage"] }).containsExactly("115", "230", "115")
+    }
+
+    @Test
+    fun `value spellings are not checked for specs with a single value or no text specs`() {
+        repeat(3) { products += product("""{"enclosure":"TEFC","power_hp":1}""") }
+        defs += def("enclosure"); defs += def("power_hp", "numeric")
+
+        assertThat(service().mergeValueSpellings(10L)).isEqualTo(0)
+        verify(exactly = 0) { llmService.findValueSynonyms(any(), any()) }
+    }
+
+    @Test
     fun `merging repeats until a pass finds nothing new`() {
         products += product("""{"phase":"1","motor_type":"PSC","power_hp":1}""")
         products += product("""{"phases":3,"motor_subtype":"Split-Phase","power_hp":2}""")

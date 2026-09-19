@@ -41,7 +41,7 @@ class OpenAiLlmClient(
             .header("Authorization", "Bearer $apiKey")
             .build()
         return client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) throw LlmException("LLM API error: ${response.code}")
+            if (!response.isSuccessful) throw llmHttpError(response.code, response.body?.string(), mapper)
             val json = mapper.readTree(response.body!!.string())
             json["choices"]?.get(0)?.get("message")?.get("content")?.asText()
                 ?: throw LlmException("Empty LLM response")

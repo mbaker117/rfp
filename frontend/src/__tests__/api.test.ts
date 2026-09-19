@@ -101,3 +101,42 @@ describe('api.getReport', () => {
     await expect(api.getReport(7, 'token')).rejects.toThrow('API error 404');
   });
 });
+
+describe('api error messages', () => {
+  const mockErr = (status: number, body?: string) =>
+    (fetch as jest.Mock).mockResolvedValueOnce({ ok: false, status, text: async () => body ?? '' });
+
+  it('uses the server error text when present', async () => {
+    mockErr(502, JSON.stringify({ error: 'LLM API error 400: Your credit balance is too low.' }));
+    await expect(api.listSuppliers('token')).rejects.toThrow(
+      'LLM API error 400: Your credit balance is too low. (API error 502)',
+    );
+  });
+
+  it('explains 401 as an expired session', async () => {
+    mockErr(401);
+    await expect(api.listSuppliers('token')).rejects.toThrow(/session has expired/i);
+  });
+
+  it('explains 403 as missing admin access', async () => {
+    mockErr(403, JSON.stringify({ status: 403, error: 'Forbidden' }));
+    await expect(api.listSuppliers('token')).rejects.toThrow(/admin access/i);
+  });
+
+  it('shows the size limit for 413', async () => {
+    mockErr(413, JSON.stringify({ error: 'File is too large. The maximum upload size is 1GB.' }));
+    await expect(api.uploadCatalog(1, new File(['x'], 'c.pdf'), 'token')).rejects.toThrow(
+      'File is too large. The maximum upload size is 1GB. (API error 413)',
+    );
+  });
+
+  it('ignores Spring default error bodies that only repeat the status text', async () => {
+    mockErr(404, JSON.stringify({ status: 404, error: 'Not Found', path: '/x' }));
+    await expect(api.getReport(7, 'token')).rejects.toThrow(/^API error 404$/);
+  });
+
+  it('reports delete failures the same way', async () => {
+    mockErr(403);
+    await expect(api.myRfps.delete(1, 'token')).rejects.toThrow(/admin access/i);
+  });
+});

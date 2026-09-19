@@ -6,8 +6,27 @@ function authHeaders(token: string): Record<string, string> {
   return { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
 }
 
+// Our handlers return { error: "<message>" }. Spring's default error body also has an
+// `error` field, but it only repeats the status text, so it's recognised by `path` and skipped.
+async function serverErrorText(res: Response): Promise<string | null> {
+  try {
+    const body = JSON.parse(await res.text());
+    if (body && typeof body.error === 'string' && body.path === undefined) return body.error;
+  } catch {
+    /* no body, or not JSON */
+  }
+  return null;
+}
+
+async function apiError(res: Response): Promise<Error> {
+  if (res.status === 401) return new Error('Your session has expired. Please log in again.');
+  if (res.status === 403) return new Error('You do not have permission for this. Admin access is required.');
+  const detail = await serverErrorText(res);
+  return new Error(detail ? `${detail} (API error ${res.status})` : `API error ${res.status}`);
+}
+
 async function json<T>(res: Response): Promise<T> {
-  if (!res.ok) throw new Error(`API error ${res.status}`);
+  if (!res.ok) throw await apiError(res);
   return res.json();
 }
 
@@ -145,7 +164,7 @@ export const api = {
         method: 'DELETE',
         headers: authHeaders(token),
       });
-      if (!res.ok) throw new Error(`API error ${res.status}`);
+      if (!res.ok) throw await apiError(res);
     },
   },
 
@@ -159,10 +178,7 @@ export const api = {
         method: 'DELETE',
         headers: authHeaders(token),
       });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({})) as { error?: string };
-        throw new Error(body.error ?? `API error ${res.status}`);
-      }
+      if (!res.ok) throw await apiError(res);
     },
     async listProducts(
       token: string,
@@ -202,21 +218,21 @@ export const api = {
         method: 'POST',
         headers: authHeaders(token),
       });
-      if (!res.ok) throw new Error(`API error ${res.status}`);
+      if (!res.ok) throw await apiError(res);
     },
     async cancel(runId: number, token: string): Promise<void> {
       const res = await fetch(`${BASE}/crawl-runs/${runId}/cancel`, {
         method: 'POST',
         headers: authHeaders(token),
       });
-      if (!res.ok) throw new Error(`API error ${res.status}`);
+      if (!res.ok) throw await apiError(res);
     },
     async retryFailed(runId: number, token: string): Promise<void> {
       const res = await fetch(`${BASE}/crawl-runs/${runId}/retry-failed`, {
         method: 'POST',
         headers: authHeaders(token),
       });
-      if (!res.ok) throw new Error(`API error ${res.status}`);
+      if (!res.ok) throw await apiError(res);
     },
   },
 };

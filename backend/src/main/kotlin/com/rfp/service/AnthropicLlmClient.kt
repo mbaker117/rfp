@@ -42,7 +42,7 @@ class AnthropicLlmClient(
             .header("anthropic-version", "2023-06-01")
             .build()
         return client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) throw LlmException("LLM API error: ${response.code}")
+            if (!response.isSuccessful) throw llmHttpError(response.code, response.body?.string(), mapper)
             val json = mapper.readTree(response.body!!.string())
             json["content"]?.get(0)?.get("text")?.asText()
                 ?: throw LlmException("Empty LLM response")

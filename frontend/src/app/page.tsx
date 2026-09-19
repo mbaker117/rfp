@@ -47,7 +47,7 @@ export default function Home() {
       setCatalogFile(f);
       setCatalogSupplierId(supplier.id);
     } catch (e) {
-      setError('Could not upload catalog — ' + String(e));
+      setError('Could not upload catalog — ' + (e instanceof Error ? e.message : String(e)));
     } finally {
       setCatalogLoading(false);
     }
@@ -71,7 +71,7 @@ export default function Home() {
       setScrapeSupplierName(domain);
       setShowScrapeInput(false);
     } catch (e) {
-      setError('Could not start scraping — ' + String(e));
+      setError('Could not start scraping — ' + (e instanceof Error ? e.message : String(e)));
     } finally {
       setScrapeLoading(false);
     }
@@ -105,7 +105,7 @@ export default function Home() {
       const { rfpId: id } = await api.uploadRfp(file, allSupplierIds, token);
       setRfpId(id);
     } catch (e) {
-      setError(String(e));
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }

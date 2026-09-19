@@ -326,7 +326,10 @@ class LlmService(
             - Keep the output compact: Do not write descriptions or summaries. Omit any key whose value is not printed
               for that product (no null, empty or "N/A" values) - this applies to "mpn", "price" and "currency" too.
             - "manualLink": URL of the product datasheet or manual, if printed
-            - "item_no": the supplier's own item/SKU number, if printed (the manufacturer model goes in "mpn")
+            - "item_no": the supplier's item number for this product - the row's own item/SKU number, if printed (the
+              manufacturer model goes in "mpn"). Other item numbers printed in the same row (a required capacitor, a
+              replacement, an accessory, a "replaces" reference) go under descriptive keys such as "capacitor_item_no",
+              never in "item_no".
             - "brand": the manufacturer name, if printed
             - ALL technical specifications: every numeric spec with the unit suffixed to the key
               (e.g. "weight_kg":1.2, "voltage_v":220, "frequency_hz":50, "accuracy_pct":0.5), every boolean

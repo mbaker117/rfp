@@ -125,6 +125,16 @@ class LlmServiceTest {
     }
 
     @Test
+    fun `catalog prompt keeps other item numbers in a row out of item_no`() {
+        val client = RecordingClient("""{"products":[]}""")
+        LlmService(client).parseCatalogChunk("page text", emptyList())
+
+        assertThat(client.systemPrompt).contains("the row's own item/SKU number")
+        assertThat(client.systemPrompt).contains("\"capacitor_item_no\"")
+        assertThat(client.systemPrompt).contains("never in \"item_no\"")
+    }
+
+    @Test
     fun `catalog answer with prose before the json is still parsed`() {
         val client = RecordingClient("""
             I need to extract products not already in the "ALREADY EXTRACTED" list. Let me identify the remaining products.

@@ -41,7 +41,9 @@ class ModelComparison {
      * no temperature.
      */
     private class OpenAiUsageRecordingClient(
-        val apiKey: String, val model: String, val maxTokens: Int = 16000
+        val apiKey: String, val model: String, val maxTokens: Int = 16000,
+        /** DeepSeek and other OpenAI-compatible providers differ only in this URL. */
+        val endpoint: String = "https://api.openai.com/v1/chat/completions"
     ) : UsageRecording {
         val http = OkHttpClient.Builder()
             .connectTimeout(30, TimeUnit.SECONDS).readTimeout(600, TimeUnit.SECONDS).writeTimeout(30, TimeUnit.SECONDS)
@@ -53,8 +55,9 @@ class ModelComparison {
          * GPT-5 models are reasoning models: they take `max_completion_tokens` rather than `max_tokens`, and
          * without a minimal reasoning effort they spend the whole budget thinking and return empty content.
          */
-        var newStyle = model.startsWith("gpt-5-")
-        var lowReasoning = model.startsWith("gpt-5-")
+        var newStyle = model.startsWith("gpt-5")
+        var lowReasoning = model.startsWith("gpt-5")
+        val deepSeek = model.startsWith("deepseek")
 
         override fun call(systemPrompt: String, userMessage: String) = callDetailed(systemPrompt, userMessage).text
 
@@ -83,12 +86,14 @@ class ModelComparison {
                     put("max_tokens", maxTokens); put("temperature", 0)
                 }
                 if (lowReasoning) put("reasoning_effort", System.getenv("RFP_COMPARE_REASONING") ?: "low")
+                // DeepSeek models think by default and would spend the budget before writing any JSON.
+                if (deepSeek) put("thinking", mapOf("type" to "disabled"))
                 put("messages", listOf(
                     mapOf("role" to "system", "content" to systemPrompt),
                     mapOf("role" to "user", "content" to userMessage)
                 ))
             })
-            val request = Request.Builder().url("https://api.openai.com/v1/chat/completions")
+            val request = Request.Builder().url(endpoint)
                 .post(body.toRequestBody("application/json".toMediaType()))
                 .header("Authorization", "Bearer $apiKey").build()
             return http.newCall(request).execute().use { response ->
@@ -99,6 +104,10 @@ class ModelComparison {
                 outputTokens += json["usage"]?.get("completion_tokens")?.asLong() ?: 0
                 val choice = json["choices"]?.get(0)
                 val text = choice?.get("message")?.get("content")?.asText()?.takeIf { it.isNotBlank() }
+                if (System.getenv("RFP_COMPARE_DUMP") != null) {
+                    println("  [$model] finish=${choice?.get("finish_reason")?.asText()} usage=${json["usage"]} " +
+                        "chars=${text?.length ?: 0} head=${text?.take(300)?.replace("\n", " ")} tail=${text?.takeLast(120)?.replace("\n", " ")}")
+                }
                 LlmResponse(
                     text ?: throw LlmException("Empty response (finish_reason ${choice?.get("finish_reason")?.asText()})"),
                     truncated = choice.get("finish_reason")?.asText() == "length"
@@ -181,9 +190,13 @@ class ModelComparison {
         println("pages $first-$last -> ${chunks.size} chunk(s), ${text.length} chars, ${knownClasses.size} known class(es)")
 
         models.forEach { model ->
-            val client: UsageRecording =
-                if (model.startsWith("gpt")) OpenAiUsageRecordingClient(env("OPENAI_API_KEY"), model)
-                else UsageRecordingClient(apiKey, model)
+            val client: UsageRecording = when {
+                model.startsWith("deepseek") -> OpenAiUsageRecordingClient(
+                    env("DEEPSEEK_API_KEY"), model, endpoint = "https://api.deepseek.com/chat/completions"
+                )
+                model.startsWith("gpt") -> OpenAiUsageRecordingClient(env("OPENAI_API_KEY"), model)
+                else -> UsageRecordingClient(apiKey, model)
+            }
             val llm = LlmService(client)
             val products = mutableListOf<ParsedProduct>()
             var calls = 0

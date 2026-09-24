@@ -137,6 +137,7 @@ Re-running match is an upsert keyed on `match_result.line_id` (unique), and `mat
 - Crawl-facing tasks are hardened: strict `schemaVersion` check, response byte/char caps, attribute count/depth/string limits, and prompts that state all page content is untrusted data, never instructions.
 - `repairTruncatedProductsJson` salvages complete product objects when a large catalog response is cut off mid-JSON.
 - Adding a provider means one new `LlmClient` implementation — prompts, caching, and parsing stay untouched.
+- `OpenAiLlmClient` also serves OpenAI-compatible providers via `RFP_LLM_BASE_URL` (DeepSeek: `https://api.deepseek.com/`). DeepSeek models think by default and the reasoning comes out of the answer's token budget, so the client sends `thinking: {"type":"disabled"}` for them, and retries once with it when any model answers with no content.
 - `AnthropicLlmClient` sends `temperature: 0`. A model that rejects it (the Claude 5 family) makes the client switch, for the rest of its life, to their shape: no temperature and `thinking: disabled` — otherwise thinking spends the whole output budget before any JSON is written. The answer is read from the first `text` block, since a thinking block can precede it.
 - `ModelComparison` (test tool, runs only with `RFP_MODEL_COMPARE` set, see its header) extracts the same catalog pages with several models — Anthropic or OpenAI — through the production prompt and continuation loop, and records products, calls and token usage per model, so coverage and cost can be compared before switching `RFP_LLM_MODEL`.
 

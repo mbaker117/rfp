@@ -82,6 +82,49 @@ class LlmClientModelShapeTest {
             .isInstanceOf(LlmException::class.java)
     }
 
+    private fun openAiReply(content: String?) = MockResponse().setBody(mapper.writeValueAsString(mapOf(
+        "choices" to listOf(mapOf("message" to mapOf("content" to content), "finish_reason" to "stop"))
+    )))
+
+    @Test
+    fun `a deepseek model is asked not to think, since thinking would eat the answer`() {
+        server.enqueue(openAiReply("""{"products":[]}"""))
+
+        OpenAiLlmClient("key", "deepseek-flash", baseUrl()).call("sys", "user")
+
+        val body = mapper.readTree(server.takeRequest().body.readUtf8())
+        assertThat(body["thinking"]["type"].asText()).isEqualTo("disabled")
+    }
+
+    @Test
+    fun `an openai model is not sent the thinking field`() {
+        server.enqueue(openAiReply("""{"products":[]}"""))
+
+        OpenAiLlmClient("key", "gpt-4o", baseUrl()).call("sys", "user")
+
+        assertThat(mapper.readTree(server.takeRequest().body.readUtf8())["thinking"]).isNull()
+    }
+
+    @Test
+    fun `an empty answer is retried once with thinking off`() {
+        server.enqueue(openAiReply(""))
+        server.enqueue(openAiReply("the answer"))
+
+        assertThat(OpenAiLlmClient("key", "some-other-model", baseUrl()).call("sys", "user")).isEqualTo("the answer")
+
+        assertThat(mapper.readTree(server.takeRequest().body.readUtf8())["thinking"]).isNull()
+        assertThat(mapper.readTree(server.takeRequest().body.readUtf8())["thinking"]["type"].asText()).isEqualTo("disabled")
+    }
+
+    @Test
+    fun `an empty answer with thinking already off is an error`() {
+        server.enqueue(openAiReply(""))
+
+        assertThatThrownBy { OpenAiLlmClient("key", "deepseek-flash", baseUrl()).call("sys", "user") }
+            .isInstanceOf(LlmException::class.java)
+        assertThat(server.requestCount).isEqualTo(1)
+    }
+
     @Test
     fun `other errors are not retried`() {
         server.enqueue(MockResponse().setResponseCode(401).setBody("""{"error":{"message":"invalid key"}}"""))

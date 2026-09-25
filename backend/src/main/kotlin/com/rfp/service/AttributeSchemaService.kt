@@ -109,7 +109,8 @@ class AttributeSchemaService(
             val canonicalDef = defsByName[g.canonical] ?: return@forEach
             val aliasDefs = g.aliases.mapNotNull { defsByName[it] }
             if (aliasDefs.isEmpty()) return@forEach
-            val valueMap = g.valueMap.mapKeys { it.key.trim().lowercase() }
+            // The value translations that come with a key merge get the same veto as a spelling merge.
+            val valueMap = ValueMergeVeto.filter(g.valueMap).mapKeys { it.key.trim().lowercase() }
             fun translate(v: Any?): Any? = v?.let { valueMap[it.toString().trim().lowercase()] ?: it }
 
             val conflict = working.values.any { a ->
@@ -241,9 +242,16 @@ class AttributeSchemaService(
             }
             val nv = SpecNumbers.parse(variant)
             val nt = SpecNumbers.parse(target)
-            if (nv != null && nt != null && abs(nv - nt) >= 1e-9) null
-            else if (variant.equals(target, ignoreCase = true)) null
-            else variant to target
+            when {
+                nv != null && nt != null && abs(nv - nt) >= 1e-9 -> null
+                variant.equals(target, ignoreCase = true) -> null
+                // One value says more than the other, whatever the model claims they mean.
+                !ValueMergeVeto.allows(variant, target) -> {
+                    log.info("Not merging value '{}' into '{}': one says more than the other", variant, target)
+                    null
+                }
+                else -> variant to target
+            }
         }.toMap()
 
     /** Translates alias keys and value spellings to the class's canonical form (new products and tender lines). */

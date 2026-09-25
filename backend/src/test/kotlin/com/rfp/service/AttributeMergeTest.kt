@@ -170,6 +170,23 @@ class AttributeMergeTest {
     }
 
     @Test
+    fun `a proposed value merge that claims more than the catalog said is refused`() {
+        // The real proposal that turned 77 one-way gearmotors into reversible ones.
+        repeat(3) { products += product("""{"rotation":"CW"}""") }
+        repeat(2) { products += product("""{"rotation":"CW/CCW"}""") }
+        products += product("""{"rotation":"CCW"}""")
+        defs += def("rotation")
+        every { llmService.findValueSynonyms(any(), any()) } returns
+            mapOf("rotation" to mapOf("CW" to "CW/CCW", "CCW" to "CW/CCW"))
+
+        assertThat(service().mergeValueSpellings(10L)).isEqualTo(0)
+
+        assertThat(products.map { attrsOf(it)["rotation"] })
+            .containsExactly("CW", "CW", "CW", "CW/CCW", "CW/CCW", "CCW")
+        assertThat(defs.single().valueAliases).isIn("{}", "")
+    }
+
+    @Test
     fun `value spellings are not checked for specs with a single value or no text specs`() {
         repeat(3) { products += product("""{"enclosure":"TEFC","power_hp":1}""") }
         defs += def("enclosure"); defs += def("power_hp", "numeric")

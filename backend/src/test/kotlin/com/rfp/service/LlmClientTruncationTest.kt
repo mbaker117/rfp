@@ -41,7 +41,7 @@ class LlmClientTruncationTest {
     fun `anthropic sends the configured max tokens`() {
         server.enqueue(anthropicReply("ok", "end_turn"))
 
-        AnthropicLlmClient("key", "model", baseUrl(), maxTokens = 16000).call("sys", "user")
+        AnthropicLlmClient("key", "", "model", baseUrl(), maxTokens = 16000).call("sys", "user")
 
         val body = mapper.readTree(server.takeRequest().body.readUtf8())
         assertThat(body["max_tokens"].asInt()).isEqualTo(16000)
@@ -51,7 +51,7 @@ class LlmClientTruncationTest {
     fun `anthropic reports truncation when it stops at max tokens`() {
         server.enqueue(anthropicReply("""{"products":[{"name":"A"},{"na""", "max_tokens"))
 
-        val res = AnthropicLlmClient("key", "model", baseUrl()).callDetailed("sys", "user")
+        val res = AnthropicLlmClient("key", "", "model", baseUrl()).callDetailed("sys", "user")
 
         assertThat(res.truncated).isTrue()
         assertThat(res.text).startsWith("""{"products"""")
@@ -61,14 +61,14 @@ class LlmClientTruncationTest {
     fun `anthropic complete answer is not truncated`() {
         server.enqueue(anthropicReply("""{"products":[]}""", "end_turn"))
 
-        assertThat(AnthropicLlmClient("key", "model", baseUrl()).callDetailed("sys", "user").truncated).isFalse()
+        assertThat(AnthropicLlmClient("key", "", "model", baseUrl()).callDetailed("sys", "user").truncated).isFalse()
     }
 
     @Test
     fun `openai sends the configured max tokens and reports length truncation`() {
         server.enqueue(openAiReply("""{"products":[{"na""", "length"))
 
-        val res = OpenAiLlmClient("key", "model", baseUrl(), maxTokens = 12000).callDetailed("sys", "user")
+        val res = OpenAiLlmClient("key", "", "model", baseUrl(), maxTokens = 12000).callDetailed("sys", "user")
 
         assertThat(res.truncated).isTrue()
         val body = mapper.readTree(server.takeRequest().body.readUtf8())
@@ -79,6 +79,6 @@ class LlmClientTruncationTest {
     fun `openai complete answer is not truncated`() {
         server.enqueue(openAiReply("""{"products":[]}""", "stop"))
 
-        assertThat(OpenAiLlmClient("key", "model", baseUrl()).callDetailed("sys", "user").truncated).isFalse()
+        assertThat(OpenAiLlmClient("key", "", "model", baseUrl()).callDetailed("sys", "user").truncated).isFalse()
     }
 }

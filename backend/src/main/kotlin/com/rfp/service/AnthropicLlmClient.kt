@@ -14,8 +14,9 @@ import org.springframework.stereotype.Service
 @Service
 @ConditionalOnProperty(name = ["rfp.llm.provider"], havingValue = "anthropic", matchIfMissing = true)
 class AnthropicLlmClient(
-    @Value("\${rfp.llm.api-key}") val apiKey: String,
-    @Value("\${rfp.llm.model}") val model: String,
+    @Value("\${rfp.llm.anthropic.api-key:}") anthropicKey: String,
+    @Value("\${rfp.llm.api-key:}") sharedKey: String,
+    @Value("\${rfp.llm.model:}") model: String,
     @Value("\${rfp.llm.base-url:https://api.anthropic.com/v1/}") val baseUrl: String = "https://api.anthropic.com/v1/",
     @Value("\${rfp.llm.max-tokens:16000}") val maxTokens: Int = 16000
 ) : LlmClient {
@@ -29,6 +30,10 @@ class AnthropicLlmClient(
         .build()
     private val mapper = ObjectMapper()
     private val log = LoggerFactory.getLogger(javaClass)
+
+    /** Its own key when set, else the shared one; likewise the model, so only the provider line has to change. */
+    val apiKey = anthropicKey.ifBlank { sharedKey }
+    val model = model.ifBlank { DEFAULT_MODEL }
 
     private val effectiveBaseUrl = baseUrl.ifBlank { "https://api.anthropic.com/v1/" }
 
@@ -74,5 +79,9 @@ class AnthropicLlmClient(
                 ?: throw LlmException("Empty LLM response")
             LlmResponse(text, truncated = json["stop_reason"]?.asText() == "max_tokens")
         }
+    }
+
+    private companion object {
+        const val DEFAULT_MODEL = "claude-sonnet-4-6"
     }
 }

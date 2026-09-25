@@ -41,7 +41,7 @@ class LlmClientModelShapeTest {
         server.enqueue(temperatureRejected())
         server.enqueue(reply(textBlock("""{"products":[]}""")))
 
-        val client = AnthropicLlmClient("key", "claude-sonnet-5", baseUrl())
+        val client = AnthropicLlmClient("key", "", "claude-sonnet-5", baseUrl())
         assertThat(client.call("sys", "user")).isEqualTo("""{"products":[]}""")
 
         val first = mapper.readTree(server.takeRequest().body.readUtf8())
@@ -58,7 +58,7 @@ class LlmClientModelShapeTest {
         server.enqueue(reply(textBlock("one")))
         server.enqueue(reply(textBlock("two")))
 
-        val client = AnthropicLlmClient("key", "claude-sonnet-5", baseUrl())
+        val client = AnthropicLlmClient("key", "", "claude-sonnet-5", baseUrl())
         client.call("sys", "user")
         assertThat(client.call("sys", "user again")).isEqualTo("two")
 
@@ -71,14 +71,14 @@ class LlmClientModelShapeTest {
     fun `the answer is read from the text block even when a thinking block comes first`() {
         server.enqueue(reply(mapOf("type" to "thinking", "thinking" to "considering"), textBlock("the answer")))
 
-        assertThat(AnthropicLlmClient("key", "model", baseUrl()).call("sys", "user")).isEqualTo("the answer")
+        assertThat(AnthropicLlmClient("key", "", "model", baseUrl()).call("sys", "user")).isEqualTo("the answer")
     }
 
     @Test
     fun `a response without a text block is an error, not a silent empty answer`() {
         server.enqueue(reply(mapOf("type" to "thinking", "thinking" to "still considering")))
 
-        assertThatThrownBy { AnthropicLlmClient("key", "model", baseUrl()).call("sys", "user") }
+        assertThatThrownBy { AnthropicLlmClient("key", "", "model", baseUrl()).call("sys", "user") }
             .isInstanceOf(LlmException::class.java)
     }
 
@@ -87,20 +87,32 @@ class LlmClientModelShapeTest {
     )))
 
     @Test
-    fun `a deepseek model is asked not to think, since thinking would eat the answer`() {
+    fun `deepseek is asked not to think, since thinking would eat the answer`() {
         server.enqueue(openAiReply("""{"products":[]}"""))
 
-        OpenAiLlmClient("key", "deepseek-flash", baseUrl()).call("sys", "user")
+        DeepSeekLlmClient("key", "", "", baseUrl()).call("sys", "user")
 
         val body = mapper.readTree(server.takeRequest().body.readUtf8())
         assertThat(body["thinking"]["type"].asText()).isEqualTo("disabled")
+        assertThat(body["model"].asText()).isEqualTo("deepseek-flash")   // the provider's default model
+    }
+
+    @Test
+    fun `each provider takes its own key, falling back to the shared one`() {
+        repeat(2) { server.enqueue(openAiReply("ok")) }
+
+        DeepSeekLlmClient("deepseek-key", "shared-key", "", baseUrl()).call("sys", "user")
+        DeepSeekLlmClient("", "shared-key", "", baseUrl()).call("sys", "user")
+
+        assertThat(server.takeRequest().getHeader("Authorization")).isEqualTo("Bearer deepseek-key")
+        assertThat(server.takeRequest().getHeader("Authorization")).isEqualTo("Bearer shared-key")
     }
 
     @Test
     fun `an openai model is not sent the thinking field`() {
         server.enqueue(openAiReply("""{"products":[]}"""))
 
-        OpenAiLlmClient("key", "gpt-4o", baseUrl()).call("sys", "user")
+        OpenAiLlmClient("key", "", "gpt-4o", baseUrl()).call("sys", "user")
 
         assertThat(mapper.readTree(server.takeRequest().body.readUtf8())["thinking"]).isNull()
     }
@@ -110,7 +122,7 @@ class LlmClientModelShapeTest {
         server.enqueue(openAiReply(""))
         server.enqueue(openAiReply("the answer"))
 
-        assertThat(OpenAiLlmClient("key", "some-other-model", baseUrl()).call("sys", "user")).isEqualTo("the answer")
+        assertThat(OpenAiLlmClient("key", "", "some-other-model", baseUrl()).call("sys", "user")).isEqualTo("the answer")
 
         assertThat(mapper.readTree(server.takeRequest().body.readUtf8())["thinking"]).isNull()
         assertThat(mapper.readTree(server.takeRequest().body.readUtf8())["thinking"]["type"].asText()).isEqualTo("disabled")
@@ -120,7 +132,7 @@ class LlmClientModelShapeTest {
     fun `an empty answer with thinking already off is an error`() {
         server.enqueue(openAiReply(""))
 
-        assertThatThrownBy { OpenAiLlmClient("key", "deepseek-flash", baseUrl()).call("sys", "user") }
+        assertThatThrownBy { DeepSeekLlmClient("key", "", "", baseUrl()).call("sys", "user") }
             .isInstanceOf(LlmException::class.java)
         assertThat(server.requestCount).isEqualTo(1)
     }
@@ -129,7 +141,7 @@ class LlmClientModelShapeTest {
     fun `other errors are not retried`() {
         server.enqueue(MockResponse().setResponseCode(401).setBody("""{"error":{"message":"invalid key"}}"""))
 
-        assertThatThrownBy { AnthropicLlmClient("key", "claude-sonnet-5", baseUrl()).call("sys", "user") }
+        assertThatThrownBy { AnthropicLlmClient("key", "", "claude-sonnet-5", baseUrl()).call("sys", "user") }
             .isInstanceOf(LlmException::class.java)
         assertThat(server.requestCount).isEqualTo(1)
     }

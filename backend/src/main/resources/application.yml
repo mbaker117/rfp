@@ -25,10 +25,23 @@ rfp:
     secret: ${JWT_SECRET:change-me-in-production-at-least-32-chars}
     expiry-hours: 24
   llm:
-    provider: ${RFP_LLM_PROVIDER:anthropic}   # anthropic | openai
-    api-key: ${RFP_LLM_API_KEY:${ANTHROPIC_API_KEY:}}
-    model: ${RFP_LLM_MODEL:claude-sonnet-4-6}
-    base-url: ${RFP_LLM_BASE_URL:}            # leave blank to use provider default
+    # Switching provider is this one line; each provider keeps its own key below, so they can all stay set.
+    provider: ${RFP_LLM_PROVIDER:anthropic}   # anthropic | openai | deepseek
+    api-key: ${RFP_LLM_API_KEY:${ANTHROPIC_API_KEY:}}   # fallback for whichever provider has no key of its own
+    model: ${RFP_LLM_MODEL:}                  # blank = the chosen provider's default model
+    base-url: ${RFP_LLM_BASE_URL:}            # blank = the chosen provider's own endpoint
+    anthropic:
+      api-key: ${RFP_LLM_ANTHROPIC_API_KEY:${ANTHROPIC_API_KEY:}}
+    openai:
+      api-key: ${RFP_LLM_OPENAI_API_KEY:${OPENAI_API_KEY:}}
+    deepseek:
+      api-key: ${RFP_LLM_DEEPSEEK_API_KEY:${DEEPSEEK_API_KEY:}}
+    # The schema tasks (naming attributes, merging duplicate names and value spellings) judge the catalog rather
+    # than read it, and a wrong judgment rewrites what a product is. They are a few dozen calls per import, so
+    # they can run on a stronger model than extraction. Unset = the main provider does them too.
+    judgment:
+      provider: ${RFP_LLM_JUDGMENT_PROVIDER:}   # anthropic | openai | deepseek
+      model: ${RFP_LLM_JUDGMENT_MODEL:}         # blank = that provider's default
     max-tokens: 16000     # output cap per LLM call; catalog chunks whose answer hits it are split and re-extracted
   catalog:
     chunk-chars: 12000   # text per LLM extraction call; small enough that one response holds every product in it

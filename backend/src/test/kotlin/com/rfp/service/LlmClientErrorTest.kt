@@ -30,7 +30,7 @@ class LlmClientErrorTest {
         server.enqueue(MockResponse().setResponseCode(400).setBody(
             """{"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API."}}"""
         ))
-        val client = AnthropicLlmClient("key", "model", baseUrl())
+        val client = AnthropicLlmClient("key", "", "model", baseUrl())
 
         assertThatThrownBy { client.call("sys", "user") }
             .isInstanceOf(LlmException::class.java)
@@ -42,7 +42,7 @@ class LlmClientErrorTest {
         server.enqueue(MockResponse().setResponseCode(429).setBody(
             """{"error":{"message":"You exceeded your current quota.","type":"insufficient_quota"}}"""
         ))
-        val client = OpenAiLlmClient("key", "model", baseUrl())
+        val client = OpenAiLlmClient("key", "", "model", baseUrl())
 
         assertThatThrownBy { client.call("sys", "user") }
             .isInstanceOf(LlmException::class.java)
@@ -52,7 +52,7 @@ class LlmClientErrorTest {
     @Test
     fun `non-json error body falls back to a truncated raw body`() {
         server.enqueue(MockResponse().setResponseCode(502).setBody("<html>" + "x".repeat(1000) + "</html>"))
-        val client = AnthropicLlmClient("key", "model", baseUrl())
+        val client = AnthropicLlmClient("key", "", "model", baseUrl())
 
         assertThatThrownBy { client.call("sys", "user") }
             .isInstanceOf(LlmException::class.java)
@@ -62,7 +62,7 @@ class LlmClientErrorTest {
     @Test
     fun `empty error body reports only the status`() {
         server.enqueue(MockResponse().setResponseCode(503))
-        val client = AnthropicLlmClient("key", "model", baseUrl())
+        val client = AnthropicLlmClient("key", "", "model", baseUrl())
 
         assertThatThrownBy { client.call("sys", "user") }
             .isInstanceOf(LlmException::class.java)

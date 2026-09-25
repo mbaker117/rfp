@@ -27,6 +27,8 @@ data class AcceptanceEstimate(val probability: Int, val reasoning: String)
 @Service
 class LlmService(
     private val llmClient: LlmClient,
+    /** Optional second model for the schema-judgment tasks; see [judge]. */
+    private val judgmentClient: JudgmentLlmClient? = null,
     val maxCrawlCandidateCharacters: Int = 12_000,
     private val maxCrawlResponseBytes: Int = 256 * 1024,
     private val maxCrawlResponseCharacters: Int = 256 * 1024,
@@ -56,6 +58,19 @@ class LlmService(
     private fun call(systemPrompt: String, userMessage: String): String {
         val key = sha256("$systemPrompt|$userMessage")
         return cache.getOrPut(key) { llmClient.call(systemPrompt, userMessage) }
+    }
+
+    /**
+     * The schema tasks — naming attributes, and deciding which names or values mean the same thing — judge the
+     * catalog rather than read it, and a wrong judgment rewrites what a product *is* (a cheap model merged `CW`
+     * into `CW/CCW`, making one-way motors reversible). They run a few dozen times per import against thousands
+     * of extraction calls, so a stronger model here costs almost nothing. Falls back to the main client when
+     * `rfp.llm.judgment.provider` is unset.
+     */
+    private fun judge(systemPrompt: String, userMessage: String): String {
+        val client = judgmentClient?.client ?: return call(systemPrompt, userMessage)
+        val key = sha256("judgment|$systemPrompt|$userMessage")
+        return cache.getOrPut(key) { client.call(systemPrompt, userMessage) }
     }
 
     // Falls back to salvaging truncated JSON: all complete top-level objects in a "products" array
@@ -405,7 +420,7 @@ class LlmService(
               "datatype":string,"matchOp":string,"canonicalUnit":string|null,"allowedValues":[]}]}
         """.trimIndent()
         val user = "Class: $className\nSamples:\n${sampleProducts.joinToString("\n")}"
-        val json = parseJson(call(system, user))
+        val json = parseJson(judge(system, user))
         val attrDefs = json["attributeDefs"] ?: throw LlmException("LLM response missing 'attributeDefs' key")
         return ClassDefinition(
             className = json["className"]?.asText() ?: throw LlmException("LLM response missing 'className' key"),
@@ -436,7 +451,7 @@ class LlmService(
         """.trimIndent()
         val user = attributes.joinToString("\n") { a -> "${a.name}: ${a.samples.joinToString(" | ")}" }
         val requested = attributes.map { it.name }.toSet()
-        val json = parseJson(call(system, user))
+        val json = parseJson(judge(system, user))
         return (json["attributes"] ?: throw LlmException("LLM response missing 'attributes' key"))
             .mapNotNull { a ->
                 val name = a["name"]?.asText()?.takeIf { it in requested } ?: return@mapNotNull null
@@ -464,7 +479,7 @@ class LlmService(
         """.trimIndent()
         val user = attributes.joinToString("\n") { a -> "${a.name} (${a.products} products): ${a.samples.joinToString(" | ")}" }
         val known = attributes.map { it.name }.toSet()
-        val json = parseJson(call(system, user))
+        val json = parseJson(judge(system, user))
         return (json["groups"] ?: throw LlmException("LLM response missing 'groups' key")).mapNotNull { g ->
             val canonical = g["canonical"]?.asText()?.takeIf { it in known } ?: return@mapNotNull null
             val aliases = g["aliases"]?.map { it.asText() }?.filter { it in known && it != canonical }?.distinct().orEmpty()
@@ -493,7 +508,7 @@ class LlmService(
             "${s.name}: " + s.values.entries.joinToString(" | ") { "${it.key} (${it.value})" }
         }
         val valuesByName = specs.associate { s -> s.name to s.values.keys }
-        val json = parseJson(call(system, user))
+        val json = parseJson(judge(system, user))
         return (json["specs"] ?: throw LlmException("LLM response missing 'specs' key")).mapNotNull { s ->
             val name = s["name"]?.asText() ?: return@mapNotNull null
             val values = valuesByName[name] ?: return@mapNotNull null

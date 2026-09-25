@@ -170,6 +170,61 @@ class MatchingEngineServiceTest {
     }
 
     @Test
+    fun `a higher insulation class satisfies a lower request`() {
+        val line = TenderLine(id = 6L, tender = tender, rawText = "motor", description = "motor",
+            productClass = productClass,
+            attributes = mapper.writeValueAsString(mapOf("insulation_class" to "F")))
+        // Class H tolerates more heat than the requested F, so it meets the requirement rather than deviating.
+        val product = Product(id = 9L, supplier = supplier, productClass = productClass,
+            name = "Motor", source = "upload",
+            attributes = mapper.writeValueAsString(mapOf("insulation_class" to "Class H")))
+        val attrDefs = listOf(
+            AttributeDef(id = 5L, productClass = productClass, name = "insulation_class",
+                label = "Insulation Class", datatype = "text", matchOp = "gte")
+        )
+
+        every { tenderLineRepo.findByTenderId(1L) } returns listOf(line)
+        every { productRepo.findBySupplierIdInAndIsStaleAndNameIgnoreCase(any(), false, any()) } returns emptyList()
+        every { productRepo.findBySupplierIdInAndIsStaleAndMpnIgnoreCase(any(), false, any()) } returns emptyList()
+        every { productRepo.findBySupplierIdInAndIsStaleAndProductClassId(listOf(1L), false, 10L) } returns listOf(product)
+        every { attrDefRepo.findByProductClassId(10L) } returns attrDefs
+        every { matchResultRepo.findByLineId(6L) } returns null
+        every { productPriceRepo.findAllById(any<Iterable<Long>>()) } returns emptyList()
+        every { matchResultRepo.save(any()) } answers { firstArg() }
+
+        service().matchTender(tender, listOf(1L))
+
+        verify { matchResultRepo.save(match { it.score == 100 && it.status == "matched" }) }
+    }
+
+    @Test
+    fun `a lower insulation class than requested is still a deviation`() {
+        val line = TenderLine(id = 7L, tender = tender, rawText = "motor", description = "motor",
+            productClass = productClass,
+            attributes = mapper.writeValueAsString(mapOf("insulation_class" to "F")))
+        val product = Product(id = 10L, supplier = supplier, productClass = productClass,
+            name = "Motor", source = "upload",
+            attributes = mapper.writeValueAsString(mapOf("insulation_class" to "B")))
+        val attrDefs = listOf(
+            AttributeDef(id = 5L, productClass = productClass, name = "insulation_class",
+                label = "Insulation Class", datatype = "text", matchOp = "gte")
+        )
+
+        every { tenderLineRepo.findByTenderId(1L) } returns listOf(line)
+        every { productRepo.findBySupplierIdInAndIsStaleAndNameIgnoreCase(any(), false, any()) } returns emptyList()
+        every { productRepo.findBySupplierIdInAndIsStaleAndMpnIgnoreCase(any(), false, any()) } returns emptyList()
+        every { productRepo.findBySupplierIdInAndIsStaleAndProductClassId(listOf(1L), false, 10L) } returns listOf(product)
+        every { attrDefRepo.findByProductClassId(10L) } returns attrDefs
+        every { matchResultRepo.findByLineId(7L) } returns null
+        every { productPriceRepo.findAllById(any<Iterable<Long>>()) } returns emptyList()
+        every { matchResultRepo.save(any()) } answers { firstArg() }
+
+        service().matchTender(tender, listOf(1L))
+
+        verify { matchResultRepo.save(match { it.score == 0 && it.status == "not_found" }) }
+    }
+
+    @Test
     fun `alternatives are capped at 5 and sorted descending`() {
         val line = TenderLine(id = 6L, tender = tender, rawText = "multimeter",
             description = "multimeter", productClass = productClass,

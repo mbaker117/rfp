@@ -305,7 +305,7 @@ class AttributeSchemaService(
             // Without product data the datatype can't be checked, but a numeric unit still follows the key suffix.
             val datatype = seen?.let { inferDatatype(it, def.datatype) } ?: def.datatype
             val unit = if (datatype == "numeric") unitFromKey(def.name) ?: def.canonicalUnit else null
-            val matchOp = matchOpFor(datatype, def.matchOp)
+            val matchOp = matchOpFor(datatype, def.matchOp, def.name)
             if (datatype != def.datatype || unit != def.canonicalUnit || matchOp != def.matchOp) {
                 attrDefRepo.save(def.copy(datatype = datatype, canonicalUnit = unit, matchOp = matchOp))
                 fixed++
@@ -330,7 +330,7 @@ class AttributeSchemaService(
                     name = key,
                     label = meta[key]?.label ?: humanize(key),
                     datatype = datatype,
-                    matchOp = matchOpFor(datatype, meta[key]?.matchOp ?: "eq"),
+                    matchOp = matchOpFor(datatype, meta[key]?.matchOp ?: "eq", key),
                     canonicalUnit = if (datatype == "numeric") unitFromKey(key) else null
                 ))
             }
@@ -349,9 +349,16 @@ class AttributeSchemaService(
         return if (current == "enum") "enum" else "text"
     }
 
-    /** gte/lte compare numbers; the matcher reports any other datatype UNVERIFIABLE under them, so use eq. */
-    private fun matchOpFor(datatype: String, requested: String): String =
-        if (datatype == "numeric" && requested in setOf("eq", "gte", "lte")) requested else "eq"
+    /**
+     * gte/lte compare numbers, so any other datatype would be UNVERIFIABLE under them and has to use eq — except
+     * the lettered scales in [OrderedSpecScales], where a higher value satisfies a lower request (insulation
+     * class H answers a request for F). Those get gte, since being asked for F and offering H is not a deviation.
+     */
+    private fun matchOpFor(datatype: String, requested: String, name: String = ""): String = when {
+        OrderedSpecScales.isOrdered(name) -> if (requested == "lte") "lte" else "gte"
+        datatype == "numeric" && requested in setOf("eq", "gte", "lte") -> requested
+        else -> "eq"
+    }
 
     private fun unitFromKey(key: String): String? =
         UNIT_SUFFIXES.entries.firstOrNull { key.endsWith("_${it.key}") }?.value

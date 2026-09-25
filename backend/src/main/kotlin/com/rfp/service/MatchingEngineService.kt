@@ -170,6 +170,10 @@ open class MatchingEngineService(
         return CandidateScore(product.id, score, verdicts)
     }
 
+    /** A number, or the rank of a lettered scale like insulation class, where "at least this" still means something. */
+    private fun rankOrNumber(spec: String, value: Any): Double? =
+        toDoubleOrNull(value) ?: OrderedSpecScales.rank(spec, value)
+
     // I2/I3: type-safe comparison; returns UNVERIFIABLE when values can't be parsed
     private fun evalVerdict(def: AttributeDef, required: Any, offered: Any): String {
         return when (def.matchOp) {
@@ -185,13 +189,13 @@ open class MatchingEngineService(
                     "COMPLIANT" else "DEVIATION"
             }
             "gte" -> {
-                val r = toDoubleOrNull(required) ?: return "UNVERIFIABLE"
-                val o = toDoubleOrNull(offered) ?: return "UNVERIFIABLE"
+                val r = rankOrNumber(def.name, required) ?: return "UNVERIFIABLE"
+                val o = rankOrNumber(def.name, offered) ?: return "UNVERIFIABLE"
                 if (o >= r) "COMPLIANT" else "DEVIATION"
             }
             "lte" -> {
-                val r = toDoubleOrNull(required) ?: return "UNVERIFIABLE"
-                val o = toDoubleOrNull(offered) ?: return "UNVERIFIABLE"
+                val r = rankOrNumber(def.name, required) ?: return "UNVERIFIABLE"
+                val o = rankOrNumber(def.name, offered) ?: return "UNVERIFIABLE"
                 if (o <= r) "COMPLIANT" else "DEVIATION"
             }
             else -> "UNVERIFIABLE"

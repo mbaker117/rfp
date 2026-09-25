@@ -65,7 +65,7 @@ class AttributeSchemaServiceTest {
         assertThat(result.added).isEqualTo(2)
         val insulation = defs.single { it.name == "insulation_class" }
         assertThat(insulation.datatype).isEqualTo("text")
-        assertThat(insulation.matchOp).isEqualTo("eq")
+        assertThat(insulation.matchOp).isEqualTo("gte")   // a lettered scale with an order
         assertThat(insulation.canonicalUnit).isNull()
         assertThat(insulation.label).isEqualTo("Label insulation_class")
         val ambient = defs.single { it.name == "max_ambient_temp_c" }
@@ -135,7 +135,7 @@ class AttributeSchemaServiceTest {
 
         val d = defs.single()
         assertThat(d.name).isEqualTo("insulation_class")
-        assertThat(d.matchOp).isEqualTo("eq")
+        assertThat(d.matchOp).isEqualTo("gte")
         assertThat(d.label).isEqualTo("Insulation Class")
     }
 
@@ -164,17 +164,31 @@ class AttributeSchemaServiceTest {
 
     @Test
     fun `text specs only match exactly, even if the rule said gte`() {
-        repeat(3) { products += product("""{"insulation_class":"F","motor_eff_group":"IE3"}""") }
-        defs += def("insulation_class", "text", "gte")
+        repeat(3) { products += product("""{"enclosure":"TEFC","motor_eff_group":"IE3"}""") }
+        defs += def("enclosure", "text", "gte")
         every { llmService.defineAttributes(any(), any()) } answers {
             secondArg<List<AttributeSample>>().map { AttributeMeta(it.name, it.name, "gte") }
         }
 
         val result = service().syncClass(10L)
 
-        assertThat(defs.single { it.name == "insulation_class" }.matchOp).isEqualTo("eq")
+        assertThat(defs.single { it.name == "enclosure" }.matchOp).isEqualTo("eq")
         assertThat(defs.single { it.name == "motor_eff_group" }.matchOp).isEqualTo("eq")
         assertThat(result.fixed).isEqualTo(1)
+    }
+
+    @Test
+    fun `a lettered scale keeps gte, so a higher class still answers a lower request`() {
+        repeat(3) { products += product("""{"insulation_class":"F","motor_efficiency_group":"IE3"}""") }
+        every { llmService.defineAttributes(any(), any()) } answers {
+            // Even when the model asks for exact matching, these scales have an order.
+            secondArg<List<AttributeSample>>().map { AttributeMeta(it.name, it.name, "eq") }
+        }
+
+        service().syncClass(10L)
+
+        assertThat(defs.single { it.name == "insulation_class" }.matchOp).isEqualTo("gte")
+        assertThat(defs.single { it.name == "motor_efficiency_group" }.matchOp).isEqualTo("gte")
     }
 
     @Test

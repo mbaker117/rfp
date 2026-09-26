@@ -42,7 +42,11 @@ rfp:
     judgment:
       provider: ${RFP_LLM_JUDGMENT_PROVIDER:}   # anthropic | openai | deepseek
       model: ${RFP_LLM_JUDGMENT_MODEL:}         # blank = that provider's default
-    max-tokens: 16000     # output cap per LLM call; catalog chunks whose answer hits it are split and re-extracted
+    # Output cap per LLM call. A chunk whose answer hits it is continued, but a model that ignores the
+    # "already extracted" instruction returns only repeats, and the chunk is then saved incomplete — so the cap
+    # has to be high enough that a dense catalog page fits in one answer. Only tokens actually generated are
+    # billed, so a higher cap costs nothing when answers are short. Current models allow 64k.
+    max-tokens: ${RFP_LLM_MAX_TOKENS:32000}
   catalog:
     chunk-chars: 12000   # text per LLM extraction call; small enough that one response holds every product in it
     max-chunks: 150      # cost cap per upload (~450-600 PDF pages); the rest of a larger document is skipped and logged

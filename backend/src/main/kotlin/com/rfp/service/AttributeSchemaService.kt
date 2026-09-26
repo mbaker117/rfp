@@ -57,12 +57,19 @@ class AttributeSchemaService(
      */
     fun syncClasses(classIds: Collection<Long>, alwaysMerge: Boolean = false): SyncResult =
         classIds.distinct().fold(SyncResult()) { acc, id ->
-            normalizeAccessorySpecs(id)
-            val synced = syncClass(id)
-            val merged = if (alwaysMerge || synced.added > 0) mergeUntilStable(id) else 0
-            val values = mergeValueSpellings(id)
-            val resynced = if (merged + values > 0) syncClass(id) else SyncResult()
-            acc + synced + resynced + SyncResult(merged = merged, values = values)
+            // One class must not cost the others their definitions: an import touches dozens of classes, and a
+            // failure here used to abandon every class after it.
+            acc + try {
+                normalizeAccessorySpecs(id)
+                val synced = syncClass(id)
+                val merged = if (alwaysMerge || synced.added > 0) mergeUntilStable(id) else 0
+                val values = mergeValueSpellings(id)
+                val resynced = if (merged + values > 0) syncClass(id) else SyncResult()
+                synced + resynced + SyncResult(merged = merged, values = values)
+            } catch (e: Exception) {
+                log.warn("Attribute sync for class {} failed, continuing with the rest: {}", id, e.message)
+                SyncResult()
+            }
         }
 
     /** The LLM can miss a group in one pass; repeat until a pass merges nothing (at most [MAX_MERGE_PASSES]). */
@@ -102,7 +109,9 @@ class AttributeSchemaService(
         }
 
         val defsByName = defs.associateBy { it.name }
-        val knownAliases = aliasRepo.findByClassId(classId).map { it.alias }.toSet()
+        // Grows as aliases are saved: two groups in one pass can name the same alias, and a second insert of it
+        // violates the (class_id, alias) unique key — which used to abandon the whole sync for the import.
+        val knownAliases = aliasRepo.findByClassId(classId).map { it.alias }.toMutableSet()
         val changed = mutableSetOf<Long>()
         var merged = 0
         groups.forEach { g ->
@@ -137,7 +146,7 @@ class AttributeSchemaService(
                 attrDefRepo.save(canonicalDef.copy(valueAliases = mapper.writeValueAsString(all)))
             }
             attrDefRepo.deleteAll(aliasDefs)
-            g.aliases.filter { it !in knownAliases }.forEach {
+            g.aliases.filter { knownAliases.add(it) }.forEach {
                 aliasRepo.save(AttributeAlias(classId = classId, alias = it, canonicalName = g.canonical))
             }
             merged++

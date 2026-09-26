@@ -187,6 +187,40 @@ class AttributeMergeTest {
     }
 
     @Test
+    fun `the same alias named by two groups is saved once, not twice`() {
+        // Saving it twice violates the (class_id, alias) unique key, which used to abandon the whole sync.
+        products += product("""{"pitch":1.0,"pitch_length":1.0,"length":2.0}""")
+        defs += def("pitch", "numeric"); defs += def("pitch_length", "numeric"); defs += def("length", "numeric")
+        every { llmService.findDuplicateAttributes(any(), any()) } returns listOf(
+            DuplicateGroup("pitch", listOf("pitch_length")),
+            DuplicateGroup("length", listOf("pitch_length"))
+        )
+
+        service().mergeDuplicates(10L)
+
+        assertThat(aliases).hasSize(1)
+        assertThat(aliases.single().alias).isEqualTo("pitch_length")
+    }
+
+    @Test
+    fun `a class that fails does not stop the others from being synced`() {
+        val other = ProductClass(id = 11L, name = "AC Gearmotor")
+        every { productClassRepo.findById(11L) } returns Optional.of(other)
+        every { productRepo.findByProductClassId(11L) } throws IllegalStateException("database hiccup")
+        repeat(3) { products += product("""{"power_hp":1}""") }
+        every { llmService.defineAttributes(any(), any()) } answers {
+            secondArg<List<AttributeSample>>().map { AttributeMeta(it.name, it.name, "eq") }
+        }
+        every { llmService.findDuplicateAttributes(any(), any()) } returns emptyList()
+        every { llmService.findValueSynonyms(any(), any()) } returns emptyMap()
+
+        val result = service().syncClasses(listOf(11L, 10L))
+
+        assertThat(result.added).isEqualTo(1)                       // class 10 was still synced
+        assertThat(defs.map { it.name }).contains("power_hp")
+    }
+
+    @Test
     fun `value spellings are not checked for specs with a single value or no text specs`() {
         repeat(3) { products += product("""{"enclosure":"TEFC","power_hp":1}""") }
         defs += def("enclosure"); defs += def("power_hp", "numeric")

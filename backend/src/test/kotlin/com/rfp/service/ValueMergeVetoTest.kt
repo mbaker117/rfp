@@ -20,6 +20,20 @@ class ValueMergeVetoTest {
     }
 
     @Test
+    fun `rotation is judged by the directions it claims, not by its words`() {
+        // Real proposal: 18 one-way gearmotors were recorded as reversible, and no words are shared.
+        assertThat(ValueMergeVeto.allows("Clockwise facing output shaft", "CW/CCW")).isFalse()
+        assertThat(ValueMergeVeto.allows("Counterclockwise facing output shaft", "CW/CCW")).isFalse()
+        assertThat(ValueMergeVeto.allows("CW", "Reversible")).isFalse()
+
+        // Same directions, different wording.
+        assertThat(ValueMergeVeto.allows("Reversible", "CW/CCW")).isTrue()
+        assertThat(ValueMergeVeto.allows("Bi-directional", "CW/CCW")).isTrue()
+        assertThat(ValueMergeVeto.allows("Clockwise facing lead end", "CW")).isTrue()
+        assertThat(ValueMergeVeto.allows("Counter Clockwise Lead End", "CCW")).isTrue()
+    }
+
+    @Test
     fun `the same value written differently is allowed`() {
         assertThat(ValueMergeVeto.allows("Cast-iron", "Cast Iron")).isTrue()
         assertThat(ValueMergeVeto.allows("Die-cast zinc", "Die Cast Zinc")).isTrue()

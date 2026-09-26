@@ -31,6 +31,12 @@ object ValueMergeVeto {
 
         sameNumber(a, b)?.let { return it }            // "90V" / "90"
 
+        // Values that name directions are compared by which directions they claim, not by their words:
+        // "Clockwise facing output shaft" shares no text with "CW/CCW" but claims one direction against two.
+        directions(a)?.let { da ->
+            directions(b)?.let { db -> return da == db }
+        }
+
         // One contains the other, so one of them says more: "CW" in "CW/CCW", "Any Angle" in "Any Angle (Except…)".
         return !na.contains(nb) && !nb.contains(na)
     }
@@ -41,6 +47,23 @@ object ValueMergeVeto {
     }
 
     private fun normalize(v: String) = v.lowercase().filter { it.isLetterOrDigit() }
+
+    /**
+     * Which rotation directions a value claims, or null when it is not about rotation. A motor that turns one way
+     * is not the same product as one that turns either way, however the catalog words it.
+     */
+    private fun directions(value: String): Set<String>? {
+        val v = value.lowercase()
+        val both = setOf("cw", "ccw")
+        if (Regex("\\breversible\\b|\\bbi-?directional\\b|\\beither direction\\b").containsMatchIn(v)) return both
+        val found = mutableSetOf<String>()
+        // Counter-clockwise first: "counterclockwise" also contains "clockwise".
+        val ccw = Regex("\\bccw\\b|counter-?\\s?clockwise")
+        val cw = Regex("\\bcw\\b|clockwise")
+        if (ccw.containsMatchIn(v)) found += "ccw"
+        if (cw.containsMatchIn(ccw.replace(v, " "))) found += "cw"
+        return found.ifEmpty { null }
+    }
 
     /** true/false when both sides are a number with an optional unit, null when they are not comparable that way. */
     private fun sameNumber(a: String, b: String): Boolean? {
